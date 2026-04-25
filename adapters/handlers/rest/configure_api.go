@@ -1504,7 +1504,7 @@ func startupRoutine(ctx, serverShutdownCtx context.Context, options *swag.Comman
 	}
 
 	// Initialize runtime config hooks and start runtime config background process
-	postInitRuntimeOverrides(appState, runtimeConfigManager)
+	postInitRuntimeOverrides(appState, serverShutdownCtx, runtimeConfigManager)
 
 	return appState
 }
@@ -2444,7 +2444,7 @@ func initRuntimeOverrides(appState *state.State) *configRuntime.ConfigManager[co
 }
 
 // postInitRuntimeOverrides registers hooks and starts runtime config background process
-func postInitRuntimeOverrides(appState *state.State, cm *configRuntime.ConfigManager[config.WeaviateRuntimeConfig]) {
+func postInitRuntimeOverrides(appState *state.State, serverShutdownCtx context.Context, cm *configRuntime.ConfigManager[config.WeaviateRuntimeConfig]) {
 	if appState.ServerConfig.Config.RuntimeOverrides.Enabled && cm != nil {
 		// register any additional runtime configs
 		if appState.Modules.UsageEnabled() {
@@ -2467,9 +2467,22 @@ func postInitRuntimeOverrides(appState *state.State, cm *configRuntime.ConfigMan
 		if appState.ServerConfig.Config.Authentication.OIDC.Enabled {
 			hooks["OIDC"] = appState.OIDC.Init
 		}
+		// Reconcile loaded shards when the async-replication kill-switch is
+		// toggled at runtime. Run in the background: ReconcileAsyncReplication
+		// does per-shard hashtree disk I/O, which must not block the runtime-
+		// config reload loop. serverShutdownCtx makes it cancellable on shutdown;
+		// errors are logged here and surfaced via the reconcileFailures metric.
+		hooks["AsyncReplicationDisabled"] = func() error {
+			enterrors.GoWrapper(func() {
+				if err := appState.DB.ReconcileAsyncReplication(serverShutdownCtx); err != nil {
+					appState.Logger.WithField("action", "reconcile_async_replication").Error(err)
+				}
+			}, appState.Logger)
+			return nil
+		}
 		maps.Copy(hooks, appState.Crons.RuntimeConfigHooks())
 
-		appState.Logger.Log(logrus.InfoLevel, "registereing OIDC runtime overrides hooks")
+		appState.Logger.Log(logrus.InfoLevel, "registering runtime overrides hooks")
 		cm.RegisterHooks(hooks)
 		// reload current overrides file to take into account additional settings
 		if err := cm.ReloadConfig(); err != nil {
