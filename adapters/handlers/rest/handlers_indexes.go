@@ -272,6 +272,14 @@ func (h *indexesHandlers) updateIndex(params schema.SchemaObjectsIndexesUpdatePa
 		return h.cancelReindexTask(params.HTTPRequest.Context(), collection, propertyName, cancelIndexType, principal)
 	}
 
+	// 0-weaviate-issues#215 B6: cleanup is also non-submit — it wipes
+	// orphan on-disk reindex state without scheduling a task and without
+	// switching the BM25 backing algorithm (the side effect of rebuild).
+	// Handled up front for the same reason as cancel.
+	if cleanupIndexType, cleaning := requestedCleanup(body); cleaning {
+		return h.cleanupOrphanReindexState(params.HTTPRequest.Context(), collection, propertyName, cleanupIndexType, targetProp)
+	}
+
 	// Determine which migration type to submit based on the diff.
 	var (
 		migrationType  db.ReindexMigrationType
@@ -342,6 +350,54 @@ func (h *indexesHandlers) updateIndex(params schema.SchemaObjectsIndexesUpdatePa
 			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
 				fmt.Sprintf("property %q does not have a searchable index", propertyName)))
 		}
+		// 0-weaviate-issues#215: refuse rebuild when the class is
+		// already on Block Max WAND. The underlying repair-searchable
+		// migration is implemented as Map→Blockmax — it assumes the
+		// source is a legacy Map-strategy bucket. When the source is
+		// already blockmax (UsingBlockMaxWAND=true), the migration
+		// runs anyway but corrupts the bucket at the runtime-swap
+		// step ("rename ... no such file or directory" on the
+		// non-existent map_<N> dir; surfaced by the B7 acceptance
+		// test). Refuse here with a clear 409 so the operator picks
+		// the right verb: cleanup:true for orphan-state recovery,
+		// or no verb at all if they were just confirming the
+		// algorithm choice.
+		if class.InvertedIndexConfig != nil && class.InvertedIndexConfig.UsingBlockMaxWAND {
+			return schema.NewSchemaObjectsIndexesUpdateConflict().WithPayload(errorResponse(
+				fmt.Sprintf("refusing rebuild for collection=%q, property=%q: the searchable index is already on BlockMaxWAND (the rebuild verb is implemented as the Map→Blockmax migration and assumes a Map-strategy source; running it on an already-blockmax property corrupts the bucket). If you want to clear orphan sidecar state without touching the algorithm, use PUT {\"searchable\":{\"cleanup\":true}}.",
+					collection, propertyName)))
+		}
+
+	case body.Searchable != nil && body.Searchable.Algorithm != "":
+		// 0-weaviate-issues#215 B7: PR description claims this body
+		// shape (`{"searchable":{"algorithm":"BlockMaxWAND"}}`)
+		// works. Make it work: route the explicit-algorithm form to
+		// the same code path as `rebuild:true`. The reverse direction
+		// (BlockMax→WAND) is still not supported — submit returns
+		// 400 with a clear message.
+		normalised := normaliseSearchableAlgorithm(body.Searchable.Algorithm)
+		if normalised == "" {
+			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+				fmt.Sprintf("unsupported searchable.algorithm %q; accepted values: %q (aliases: %q, %q). BlockMax→WAND is intentionally not supported at this time.",
+					body.Searchable.Algorithm, "BlockMaxWAND", "blockmax", "BMW")))
+		}
+		migrationType = db.ReindexTypeRepairSearchable
+		properties = []string{propertyName}
+		if targetProp.IndexSearchable != nil && !*targetProp.IndexSearchable {
+			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+				fmt.Sprintf("property %q does not have a searchable index", propertyName)))
+		}
+		// 0-weaviate-issues#215: same guard as the rebuild path.
+		// algorithm:"BlockMaxWAND" is documented as equivalent to
+		// rebuild:true, so it must inherit the "refuse when already
+		// on the target algorithm" gate. Without this guard, the
+		// MapToBlockmax engine runs on a property whose source is
+		// already inverted-strategy and crashes at the swap step.
+		if class.InvertedIndexConfig != nil && class.InvertedIndexConfig.UsingBlockMaxWAND {
+			return schema.NewSchemaObjectsIndexesUpdateConflict().WithPayload(errorResponse(
+				fmt.Sprintf("refusing algorithm:%q for collection=%q, property=%q: the searchable index is already on BlockMaxWAND. The Map→Blockmax migration assumes a Map-strategy source; running it on an already-blockmax property corrupts the bucket. If you want to clear orphan sidecar state without touching the algorithm, use PUT {\"searchable\":{\"cleanup\":true}}.",
+					normalised, collection, propertyName)))
+		}
 
 	case body.Filterable != nil && body.Filterable.Enabled:
 		migrationType = db.ReindexTypeEnableFilterable
@@ -383,9 +439,9 @@ func (h *indexesHandlers) updateIndex(params schema.SchemaObjectsIndexesUpdatePa
 		// then alphabetical within group.
 		return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
 			"no actionable change detected; set one of: " +
-				"searchable.cancel, searchable.enabled, searchable.rebuild, searchable.tokenization, " +
-				"filterable.cancel, filterable.enabled, filterable.rebuild, filterable.tokenization, " +
-				"rangeable.cancel, rangeable.enabled, rangeable.rebuild"))
+				"searchable.algorithm, searchable.cancel, searchable.cleanup, searchable.enabled, searchable.rebuild, searchable.tokenization, " +
+				"filterable.cancel, filterable.cleanup, filterable.enabled, filterable.rebuild, filterable.tokenization, " +
+				"rangeable.cancel, rangeable.cleanup, rangeable.enabled, rangeable.rebuild"))
 	}
 
 	// --- Multi-tenancy handling ---
@@ -602,6 +658,24 @@ func requestedCancel(body *models.IndexUpdateRequest) (string, bool) {
 	return "", false
 }
 
+// requestedCleanup returns (indexType, true) if the body asks to clean
+// orphan on-disk reindex state for this property, where indexType is one
+// of "filterable", "searchable", or "rangeable". Returns ("", false)
+// otherwise. validateBodyExclusivity has already guaranteed at most one
+// cleanup field is set across the body and that no other verb in the
+// same group is set alongside it. See 0-weaviate-issues#215 B6.
+func requestedCleanup(body *models.IndexUpdateRequest) (string, bool) {
+	switch {
+	case body.Searchable != nil && body.Searchable.Cleanup:
+		return "searchable", true
+	case body.Filterable != nil && body.Filterable.Cleanup:
+		return "filterable", true
+	case body.Rangeable != nil && body.Rangeable.Cleanup:
+		return "rangeable", true
+	}
+	return "", false
+}
+
 // cancelReindexTask finds the STARTED reindex task targeting
 // (collection, propertyName, indexType) and asks DTM to cancel it.
 // Returns 404 if no matching task exists, 202 with the cancelled
@@ -623,6 +697,7 @@ func (h *indexesHandlers) cancelReindexTask(ctx context.Context, collection, pro
 
 	// Find the STARTED task that targets this (collection, prop, indexType).
 	var target *distributedtask.Task
+	var targetPayload db.ReindexTaskPayload
 	for _, task := range tasks[db.ReindexNamespace] {
 		if task.Status != distributedtask.TaskStatusStarted {
 			continue
@@ -641,11 +716,20 @@ func (h *indexesHandlers) cancelReindexTask(ctx context.Context, collection, pro
 			continue
 		}
 		target = task
+		targetPayload = payload
 		break
 	}
 
 	if target == nil {
-		return schema.NewSchemaObjectsIndexesUpdateNotFound()
+		// 0-weaviate-issues#215 B5: bare 404 with no body is
+		// indistinguishable from "endpoint not found" for operators
+		// chasing a stuck-state cancel. Return a structured error
+		// body identifying the (collection, property, indexType)
+		// tuple the operator was trying to cancel and the actionable
+		// remedy.
+		return schema.NewSchemaObjectsIndexesUpdateNotFound().WithPayload(errorResponse(fmt.Sprintf(
+			"no in-flight reindex task to cancel for (collection=%q, property=%q, indexType=%q): the task may have already finished, been cancelled, or never been started; use GET /v1/schema/%s/indexes to inspect the current state",
+			collection, propertyName, indexType, collection)))
 	}
 
 	if err := h.appState.ClusterService.CancelDistributedTask(
@@ -696,13 +780,39 @@ func (h *indexesHandlers) cancelReindexTask(ctx context.Context, collection, pro
 			// slate. Errors here are logged but don't fail the cancel —
 			// the user already received 202 conceptually, and the defense
 			// in depth at submit time will re-run cleanup.
-			if err := h.appState.DB.CleanStalePartialReindexState(ctx, collection, propertyName, indexType); err != nil {
+			//
+			// 0-weaviate-issues#215 B8: walk EVERY indexType the
+			// migration touches, not just the indexType named in the
+			// request URL. change-tokenization spawns both a
+			// searchable and a filterable strategy under a single
+			// DTM task; a cancel that cleans only `indexType` leaves
+			// the sibling's `payload.mig` orphan (and, if the sibling's
+			// iteration had progressed past markStarted, its sidecar
+			// bucket too).
+			indexTypesToClean, known := indexTypesFromMigrationType(targetPayload.MigrationType)
+			if !known || len(indexTypesToClean) == 0 {
+				// Defensive: a payload whose migration type we don't
+				// recognise (e.g. an unknown future strategy) still
+				// gets at least the indexType the user named cleaned,
+				// so the cancel path stays in lockstep with submit-time
+				// pre-cleanup (which also degrades to "nothing to do"
+				// on unknown types).
+				indexTypesToClean = []string{indexType}
+			}
+			var cleanupErrs []error
+			for _, it := range indexTypesToClean {
+				if err := h.appState.DB.CleanStalePartialReindexState(ctx, collection, propertyName, it); err != nil {
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("indexType=%q: %w", it, err))
+				}
+			}
+			if len(cleanupErrs) > 0 {
 				h.appState.Logger.WithFields(logrus.Fields{
 					"taskID":     target.ID,
 					"collection": collection,
 					"property":   propertyName,
 					"index_type": indexType,
-				}).Errorf("cancel: cleaning partial reindex state on disk: %v; next submit's defense-in-depth cleanup will retry", err)
+					"strategies": indexTypesToClean,
+				}).Errorf("cancel: cleaning partial reindex state on disk for %d strategies failed: %v; next submit's defense-in-depth cleanup will retry", len(cleanupErrs), cleanupErrs)
 			} else {
 				h.appState.Logger.WithFields(logrus.Fields{
 					"taskID":     target.ID,
@@ -733,6 +843,111 @@ func (h *indexesHandlers) cancelReindexTask(ctx context.Context, collection, pro
 	return schema.NewSchemaObjectsIndexesUpdateAccepted().WithPayload(&models.IndexUpdateResponse{
 		TaskID: target.ID,
 		Status: "CANCELLED",
+	})
+}
+
+// cleanupOrphanReindexState wipes any leftover on-disk runtime-reindex
+// state for (collection, propertyName, indexType) without scheduling a
+// task and without switching the BM25 backing algorithm. This is the
+// side-effect-free counterpart to rebuild:true / algorithm:"BlockMaxWAND":
+// where those repair a corrupt searchable index by re-running the
+// migration end to end (which forces a Map→BlockMax cutover that is
+// not reversible), this verb only removes orphan sentinels and partial
+// sidecar buckets. The schema's indexSearchable/indexFilterable/
+// indexRangeFilters flag and the index's algorithm choice are
+// untouched. See 0-weaviate-issues#215 B6.
+//
+// Refuses with 409 if a STARTED reindex task targets the same tuple —
+// running cleanup while a worker is still writing to the sidecar
+// buckets would tear those buckets out from under the writer
+// (CleanStalePartialReindexState's "Caller MUST ensure no local
+// reindex goroutine is touching this tuple" precondition). The
+// structured error points the operator at the cancel verb.
+//
+// Idempotent: if no orphan state is on disk the per-shard cleanup is a
+// no-op and the handler returns 202 with Status="NOTHING_TO_CLEAN".
+//
+// Auth: same as submit/cancel — UPDATE on Collections(collection).
+// Already checked by updateIndex before this is reached.
+func (h *indexesHandlers) cleanupOrphanReindexState(ctx context.Context, collection, propertyName, indexType string, targetProp *models.Property) middleware.Responder {
+	// Reject cleanup for an indexType the property doesn't have. Without
+	// this, an operator with the wrong tuple silently gets "NOTHING_TO_CLEAN"
+	// — convenient for the no-op idempotency story, but ambiguous to debug.
+	// The check mirrors what the corresponding rebuild verb does.
+	switch indexType {
+	case "searchable":
+		if targetProp.IndexSearchable != nil && !*targetProp.IndexSearchable {
+			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+				fmt.Sprintf("property %q does not have a searchable index", propertyName)))
+		}
+	case "filterable":
+		if targetProp.IndexFilterable != nil && !*targetProp.IndexFilterable {
+			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+				fmt.Sprintf("property %q does not have a filterable index", propertyName)))
+		}
+	case "rangeable":
+		if targetProp.IndexRangeFilters != nil && !*targetProp.IndexRangeFilters {
+			return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+				fmt.Sprintf("property %q does not have a rangeable index", propertyName)))
+		}
+	default:
+		// requestedCleanup only returns these three; defensive.
+		return schema.NewSchemaObjectsIndexesUpdateBadRequest().WithPayload(errorResponse(
+			fmt.Sprintf("unknown indexType %q for cleanup", indexType)))
+	}
+
+	// Refuse if a STARTED task targets this tuple. The cleanup helper
+	// would race the worker's writes; the operator wants `cancel:true`
+	// instead, which (since the B8 fix) also fans cleanup out across
+	// every sub-strategy the task spawned.
+	if h.appState.ClusterService != nil {
+		tasks, err := h.appState.ClusterService.ListDistributedTasks(ctx)
+		if err != nil {
+			return schema.NewSchemaObjectsIndexesUpdateInternalServerError().WithPayload(errorResponse(
+				fmt.Sprintf("listing tasks for cleanup precondition: %v", err)))
+		}
+		for _, task := range tasks[db.ReindexNamespace] {
+			if task.Status != distributedtask.TaskStatusStarted {
+				continue
+			}
+			var payload db.ReindexTaskPayload
+			if err := json.Unmarshal(task.Payload, &payload); err != nil {
+				continue
+			}
+			if !strings.EqualFold(payload.Collection, collection) {
+				continue
+			}
+			if !slices.Contains(payload.Properties, propertyName) {
+				continue
+			}
+			if matches, _ := migrationTypeTargetsIndex(payload.MigrationType, indexType); !matches {
+				continue
+			}
+			return schema.NewSchemaObjectsIndexesUpdateConflict().WithPayload(errorResponse(fmt.Sprintf(
+				"refusing cleanup for (collection=%q, property=%q, indexType=%q): an in-flight reindex task (taskID=%q, migrationType=%q) is still STARTED on this tuple. Running cleanup now would race the worker's writes against on-disk state. Issue PUT {\"%s\":{\"cancel\":true}} first; once the task is CANCELLED, cleanup runs automatically. If you want to wait the task out, GET /v1/schema/%s/indexes will show its progress.",
+				collection, propertyName, indexType, task.ID, payload.MigrationType, indexType, collection)))
+		}
+	}
+
+	// CleanStalePartialReindexState is idempotent — missing tracker dirs
+	// and unloaded sidecar buckets are silently skipped. So the response
+	// status here is a confirmation that the cleanup ran, not that work
+	// was done. Operators who want before/after evidence should diff
+	// GET /v1/schema/<class>/indexes around the call.
+	if err := h.appState.DB.CleanStalePartialReindexState(ctx, collection, propertyName, indexType); err != nil {
+		return schema.NewSchemaObjectsIndexesUpdateInternalServerError().WithPayload(errorResponse(
+			fmt.Sprintf("cleanup of partial reindex state for (collection=%q, property=%q, indexType=%q) failed: %v",
+				collection, propertyName, indexType, err)))
+	}
+
+	h.appState.Logger.WithFields(logrus.Fields{
+		"audit_event": "reindex_orphan_cleanup",
+		"collection":  collection,
+		"property":    propertyName,
+		"index_type":  indexType,
+	}).Info("PUT cleanup: orphan reindex state cleanup completed")
+	return schema.NewSchemaObjectsIndexesUpdateAccepted().WithPayload(&models.IndexUpdateResponse{
+		Status: "CLEANED",
 	})
 }
 
@@ -844,6 +1059,23 @@ func migrationTypeTargetsIndex(mt db.ReindexMigrationType, indexType string) (ma
 		return indexType == "filterable", true
 	}
 	return false, false
+}
+
+// normaliseSearchableAlgorithm canonicalises an explicit
+// searchable.algorithm verb value into the single supported target
+// (BlockMaxWAND). Accepted aliases are case-insensitive:
+// "BlockMaxWAND", "blockmax", "BMW", "block_max_wand". Any other
+// value (including "WAND", "wand") returns "" — the BlockMax→WAND
+// reverse direction is intentionally not supported at this time
+// because the underlying repair-searchable migration only writes
+// blockmax-format segments. Callers map "" to a 400 with a clear
+// message; see 0-weaviate-issues#215 B7.
+func normaliseSearchableAlgorithm(value string) string {
+	switch strings.ToLower(strings.ReplaceAll(value, "_", "")) {
+	case "blockmaxwand", "blockmax", "bmw":
+		return "BlockMaxWAND"
+	}
+	return ""
 }
 
 // parsedReindexTask pairs a distributed task with its already-unmarshalled

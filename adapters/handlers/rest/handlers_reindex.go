@@ -332,8 +332,24 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Searchable.Cancel {
 			verbs = append(verbs, "searchable.cancel")
 		}
+		// `algorithm` is a verb on its own — explicit-algorithm form of
+		// the searchable rebuild (0-weaviate-issues#215 B7). It is
+		// mutually exclusive with `rebuild` since both route through
+		// the same migration; setting both is ambiguous.
+		if body.Searchable.Algorithm != "" {
+			verbs = append(verbs, "searchable.algorithm")
+		}
+		// `cleanup` is a verb on its own — side-effect-free repair for
+		// orphan on-disk reindex state, 0-weaviate-issues#215 B6.
+		// Exclusive with every other verb in the group: cleanup is the
+		// "do nothing but remove orphan state" operation; combining it
+		// with enable/rebuild/algorithm/tokenization/cancel would race
+		// the cleanup against the submitted work.
+		if body.Searchable.Cleanup {
+			verbs = append(verbs, "searchable.cleanup")
+		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in searchable: %v — set exactly one of enabled, rebuild, tokenization, or cancel (tokenization combined with enabled is allowed)", verbs)
+			return fmt.Errorf("conflicting fields in searchable: %v — set exactly one of enabled, rebuild, tokenization, algorithm, cancel, or cleanup (tokenization combined with enabled is allowed)", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "searchable")
@@ -357,8 +373,12 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Filterable.Cancel {
 			verbs = append(verbs, "filterable.cancel")
 		}
+		// `cleanup` — side-effect-free repair, 0-weaviate-issues#215 B6.
+		if body.Filterable.Cleanup {
+			verbs = append(verbs, "filterable.cleanup")
+		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in filterable: %v — set exactly one of enabled, rebuild, tokenization, or cancel", verbs)
+			return fmt.Errorf("conflicting fields in filterable: %v — set exactly one of enabled, rebuild, tokenization, cancel, or cleanup", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "filterable")
@@ -377,8 +397,12 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Rangeable.Cancel {
 			verbs = append(verbs, "rangeable.cancel")
 		}
+		// `cleanup` — side-effect-free repair, 0-weaviate-issues#215 B6.
+		if body.Rangeable.Cleanup {
+			verbs = append(verbs, "rangeable.cleanup")
+		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in rangeable: %v — set exactly one of enabled, rebuild, or cancel", verbs)
+			return fmt.Errorf("conflicting fields in rangeable: %v — set exactly one of enabled, rebuild, cancel, or cleanup", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "rangeable")
@@ -393,11 +417,14 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		// handlers_indexes.go::updateIndex — same shape as the matching
 		// default-case 400. A missing verb here lands as a confusing 400
 		// (valid body shape, "invalid" error). See
-		// weaviate/0-weaviate-issues#227 (Gap 7).
+		// weaviate/0-weaviate-issues#227 (Gap 7) and the matching
+		// handler-side 400 in handlers_indexes.go::updateIndex's default
+		// arm — both lists must stay in lockstep including the
+		// algorithm/cleanup verbs added by weaviate/0-weaviate-issues#215.
 		return fmt.Errorf("no actionable change detected; set one of: " +
-			"searchable.cancel, searchable.enabled, searchable.rebuild, searchable.tokenization, " +
-			"filterable.cancel, filterable.enabled, filterable.rebuild, filterable.tokenization, " +
-			"rangeable.cancel, rangeable.enabled, rangeable.rebuild")
+			"searchable.algorithm, searchable.cancel, searchable.cleanup, searchable.enabled, searchable.rebuild, searchable.tokenization, " +
+			"filterable.cancel, filterable.cleanup, filterable.enabled, filterable.rebuild, filterable.tokenization, " +
+			"rangeable.cancel, rangeable.cleanup, rangeable.enabled, rangeable.rebuild")
 	}
 	return nil
 }

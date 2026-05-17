@@ -5603,7 +5603,10 @@ func init() {
             }
           },
           "404": {
-            "description": "Collection or property not found."
+            "description": "Collection or property not found, or (for cancel:true requests) no in-flight reindex task to cancel.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
           },
           "409": {
             "description": "Conflicting reindex task already running.",
@@ -8391,6 +8394,10 @@ func init() {
           "description": "When true, cancels the in-flight reindex task targeting this property's filterable index.",
           "type": "boolean"
         },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's filterable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, filterable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexFilterable flag is unchanged.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -8408,6 +8415,10 @@ func init() {
       "properties": {
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's rangeable index.",
+          "type": "boolean"
+        },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's rangeable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, rangeable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexRangeFilters flag is unchanged.",
           "type": "boolean"
         },
         "enabled": {
@@ -8447,15 +8458,23 @@ func init() {
     "IndexUpdateSearchable": {
       "type": "object",
       "properties": {
+        "algorithm": {
+          "description": "Explicitly select the BM25 backing algorithm for the searchable index. Accepts \"BlockMaxWAND\" (aliases: \"blockmax\", \"BMW\"). Triggers the same rebuild as rebuild:true but makes the algorithm choice explicit in the request body. The reverse direction (\"WAND\") is intentionally not supported at this time; submitting it returns 400.",
+          "type": "string"
+        },
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.",
+          "type": "boolean"
+        },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.",
           "type": "boolean"
         },
         "enabled": {
           "type": "boolean"
         },
         "rebuild": {
-          "description": "When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -\u003e wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb.",
+          "description": "When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -\u003e wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb. Equivalent to algorithm:\"BlockMaxWAND\".",
           "type": "boolean"
         },
         "tokenization": {
@@ -16473,7 +16492,10 @@ func init() {
             }
           },
           "404": {
-            "description": "Collection or property not found."
+            "description": "Collection or property not found, or (for cancel:true requests) no in-flight reindex task to cancel.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
           },
           "409": {
             "description": "Conflicting reindex task already running.",
@@ -19446,6 +19468,10 @@ func init() {
           "description": "When true, cancels the in-flight reindex task targeting this property's filterable index.",
           "type": "boolean"
         },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's filterable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, filterable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexFilterable flag is unchanged.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -19463,6 +19489,10 @@ func init() {
       "properties": {
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's rangeable index.",
+          "type": "boolean"
+        },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's rangeable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, rangeable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexRangeFilters flag is unchanged.",
           "type": "boolean"
         },
         "enabled": {
@@ -19502,15 +19532,23 @@ func init() {
     "IndexUpdateSearchable": {
       "type": "object",
       "properties": {
+        "algorithm": {
+          "description": "Explicitly select the BM25 backing algorithm for the searchable index. Accepts \"BlockMaxWAND\" (aliases: \"blockmax\", \"BMW\"). Triggers the same rebuild as rebuild:true but makes the algorithm choice explicit in the request body. The reverse direction (\"WAND\") is intentionally not supported at this time; submitting it returns 400.",
+          "type": "string"
+        },
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.",
+          "type": "boolean"
+        },
+        "cleanup": {
+          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.",
           "type": "boolean"
         },
         "enabled": {
           "type": "boolean"
         },
         "rebuild": {
-          "description": "When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -\u003e wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb.",
+          "description": "When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -\u003e wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb. Equivalent to algorithm:\"BlockMaxWAND\".",
           "type": "boolean"
         },
         "tokenization": {

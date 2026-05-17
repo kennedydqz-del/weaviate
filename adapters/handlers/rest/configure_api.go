@@ -701,9 +701,39 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 	appState.ClusterService = rCluster.New(rConfig, appState.AuthzController, appState.AuthzSnapshotter, appState.GRPCServerMetrics)
 	migrator.SetCluster(appState.ClusterService.Raft)
 
+	// Wrap RestoreClassDir so each post-RAFT-apply move from
+	// `<dataPath>/.backup.tmp/<class>/` → `<dataPath>/<class>/` also
+	// fires the orphan-reindex audit on the freshly-restored
+	// on-disk state. This closes 0-weaviate-issues#215 B3 Gap 1:
+	// without this hook a restore of a pre-fix backup whose payload
+	// contained orphan `.migrations/<tracker>/` directories would
+	// leak them until the next process restart.
+	//
+	// The audit's `IfReady` variant no-ops when the deps closure has
+	// not yet been wired (i.e. before Scheduler bootstrap has
+	// finished); in that window the startup-time audit handles
+	// orphans. The deps closure is installed below from the
+	// Scheduler.Start goroutine.
+	classDirMover := backup.RestoreClassDir(dataPath)
+	restoreClassDirWithAudit := func(class string) error {
+		if err := classDirMover(class); err != nil {
+			return err
+		}
+		// Use background ctx — this fires from the RAFT FSM apply
+		// path which does not propagate a meaningful audit ctx, and
+		// the audit needs to complete regardless of which goroutine
+		// triggered it.
+		if err := repo.AuditOrphanReindexTrackersIfReady(context.Background()); err != nil {
+			appState.Logger.WithField("action", "reindex_orphan_audit_post_class_dir_restore").
+				WithField("class", class).WithError(err).
+				Warn("reindex orphan audit failed after class-dir restore; the next process restart will retry")
+		}
+		return nil
+	}
+
 	executor := schema.NewExecutor(migrator,
 		appState.ClusterService.SchemaReader(),
-		appState.Logger, backup.RestoreClassDir(dataPath),
+		appState.Logger, restoreClassDirWithAudit,
 	)
 
 	offloadmod, _ := appState.Modules.OffloadBackend("offload-s3")
@@ -950,7 +980,76 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 		if err = appState.DistributedTaskScheduler.Start(ctx); err != nil {
 			appState.Logger.WithError(err).WithField("action", "startup").
 				Error("failed to start distributed task scheduler")
+			return
 		}
+
+		// Post-bootstrap orphan-reindex audit. Sequenced AFTER
+		// `Scheduler.Start` (which synchronously calls
+		// `bootstrapProviders`) so the closure observes the steady-state
+		// view of RAFT-known tasks. Without this audit, a cluster
+		// restored from a pre-#215-fix backup whose payload captured
+		// `<lsm>/.migrations/<tracker>/` directories without the
+		// matching DTM unit would leak the orphan sidecar buckets
+		// (P1 case) or run double-write callbacks against a never-
+		// swappable ingest bucket (P2 case) forever. The audit
+		// quarantines those trackers + shuts down their sidecars so
+		// the restored cluster reaches a self-consistent state on the
+		// pre-migration schema. See 0-weaviate-issues#215 B3.
+		//
+		// We deliberately do NOT use the `ctx` captured from the
+		// outer MakeAppState scope here — that context has a 60-minute
+		// timeout AND is cancelled by `configureAPI`'s defer when the
+		// HTTP server finishes its initialisation. By the time this
+		// goroutine actually runs (it waits for meta store ready +
+		// scheduler bootstrap, both of which take several seconds),
+		// `configureAPI` has already returned and `ctx` is dead. Calls
+		// to [Store.PauseCompaction] propagate that cancellation deep
+		// into the cycle manager's Deactivate, which would surface as
+		// "long-running compaction in progress: deactivating callback
+		// ... failed: context canceled" — a misleading error since no
+		// compaction is actually in progress. Use `serverShutdownCtx`,
+		// which lives for the entire server lifetime and is the same
+		// context the rest of the long-running startup work uses.
+		auditCtx := serverShutdownCtx
+		knownTask := func(taskID string, taskVersion uint64) bool {
+			tasksByNamespace, err := appState.ClusterService.ListDistributedTasks(auditCtx)
+			if err != nil {
+				// Treat list-failure as "DTM is unavailable, every task
+				// is potentially in-flight" — i.e. DO NOT quarantine.
+				// Returning true here is the conservative classification:
+				// it leaves orphans in place rather than wiping a
+				// legitimate in-flight migration whose snapshot we
+				// couldn't read. The audit retries on the next process
+				// restart.
+				appState.Logger.WithError(err).WithField("action", "reindex_orphan_audit").
+					Warn("reindex orphan audit: cannot list DTM tasks; treating all trackers as known (audit deferred to next restart)")
+				return true
+			}
+			for _, task := range tasksByNamespace[db.ReindexNamespace] {
+				if task.ID == taskID && task.Version == taskVersion {
+					return true
+				}
+			}
+			return false
+		}
+		if err := repo.AuditOrphanReindexTrackers(auditCtx, knownTask, appState.Logger); err != nil {
+			appState.Logger.WithError(err).WithField("action", "startup").
+				Warn("reindex orphan audit did not run cleanly; restored clusters may retain orphan sidecar buckets")
+		}
+
+		// Install the audit deps on DB so the on-demand
+		// post-restore-class-dir hook (wired into RestoreClassDir at
+		// executor construction time) can run the audit using the
+		// same lookup. The wrapper inside RestoreClassDir is the
+		// authoritative trigger for the post-restore case: it fires
+		// AFTER the file move from `.backup.tmp/<class>/` to the
+		// final `<class>/<shard>/lsm/...` layout, which is the
+		// moment orphan tracker dirs become visible on disk.
+		//
+		// 0-weaviate-issues#215 B3 Gap 1 — see the
+		// restoreClassDirWithAudit wrapper above for the full
+		// rationale.
+		repo.SetReindexAuditDeps(knownTask, appState.Logger)
 	}, appState.Logger)
 
 	return appState

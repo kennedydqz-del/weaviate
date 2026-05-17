@@ -31,6 +31,9 @@ type IndexUpdateRangeable struct {
 	// When true, cancels the in-flight reindex task targeting this property's rangeable index.
 	Cancel bool `json:"cancel,omitempty"`
 
+	// When true, removes any leftover on-disk runtime-reindex state (sentinel `.migrations/<dir>` and partial `__reindex`/`__ingest` sidecar buckets) for this property's rangeable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration (see runtime-reindex PR description and 0-weaviate-issues#215 B6). The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, rangeable) tuple — issue `cancel:true` first. Idempotent: if nothing is on disk, the call returns 200 with `"nothing to clean"` in the response body. The schema's `indexRangeFilters` flag is unchanged.
+	Cleanup bool `json:"cleanup,omitempty"`
+
 	// enabled
 	Enabled bool `json:"enabled,omitempty"`
 
