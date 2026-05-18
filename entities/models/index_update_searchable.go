@@ -28,19 +28,19 @@ import (
 // swagger:model IndexUpdateSearchable
 type IndexUpdateSearchable struct {
 
-	// Explicitly select the BM25 backing algorithm for the searchable index. Accepts "BlockMaxWAND" (alias "blockmax", "BMW"). Triggers the same rebuild as `rebuild:true` but makes the algorithm choice explicit in the request body — useful for operator scripts that want to assert the target. The reverse direction ("WAND") is intentionally not supported at this time; submitting it returns 400. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb.
+	// Explicitly select the BM25 backing algorithm for the searchable index. Accepts "BlockMaxWAND" (aliases: "blockmax", "BMW"). Triggers the same rebuild as rebuild:true but makes the algorithm choice explicit in the request body. The reverse direction ("WAND") is intentionally not supported at this time; submitting it returns 400.
 	Algorithm string `json:"algorithm,omitempty"`
 
 	// When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.
 	Cancel bool `json:"cancel,omitempty"`
 
-	// When true, removes any leftover on-disk runtime-reindex state (sentinel `.migrations/<dir>` and partial `__reindex`/`__ingest` sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration (see runtime-reindex PR description and 0-weaviate-issues#215 B6). The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue `cancel:true` first. Idempotent: if nothing is on disk, the call returns 200 with `"nothing to clean"` in the response body. The schema's `indexSearchable` flag and the searchable index's BM25 algorithm are unchanged.
+	// When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/<dir> and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with "nothing to clean" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.
 	Cleanup bool `json:"cleanup,omitempty"`
 
 	// enabled
 	Enabled bool `json:"enabled,omitempty"`
 
-	// When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -> wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb. Equivalent to `algorithm:"BlockMaxWAND"`.
+	// When true, rebuilds the searchable index for this property. The rebuild also switches the BM25 backing algorithm from WAND (the legacy map strategy) to Block Max WAND (the inverted strategy). The reverse direction (blockmax -> wand) is intentionally not supported at this time: callers cannot revert a property to WAND once it has been rebuilt onto blockmax. Read the current algorithm from GET /v1/schema/{className}/indexes (IndexStatus.algorithm) before issuing this verb. Equivalent to algorithm:"BlockMaxWAND".
 	Rebuild bool `json:"rebuild,omitempty"`
 
 	// tokenization

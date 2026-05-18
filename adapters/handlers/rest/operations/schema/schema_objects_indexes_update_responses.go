@@ -188,7 +188,7 @@ func (o *SchemaObjectsIndexesUpdateForbidden) WriteResponse(rw http.ResponseWrit
 const SchemaObjectsIndexesUpdateNotFoundCode int = 404
 
 /*
-SchemaObjectsIndexesUpdateNotFound Collection or property not found, or (for `cancel:true` requests) no in-flight reindex task to cancel.
+SchemaObjectsIndexesUpdateNotFound Collection or property not found, or (for cancel:true requests) no in-flight reindex task to cancel.
 
 swagger:response schemaObjectsIndexesUpdateNotFound
 */

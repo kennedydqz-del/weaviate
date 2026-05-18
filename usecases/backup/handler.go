@@ -108,7 +108,6 @@ func NewHandler(
 	return m
 }
 
-
 // Compression is the compression configuration.
 type Compression struct {
 	// Level is one of GzipDefaultCompression, GzipBestSpeed, GzipBestCompression

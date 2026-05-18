@@ -39,6 +39,14 @@ func start3NodeReindexCluster(ctx context.Context, t *testing.T) (*docker.Docker
 		WithWeaviateEnv("DISTRIBUTED_TASKS_COMPLETED_TASK_TTL_HOURS", "1").
 		WithWeaviateEnv("DISABLE_LAZY_LOAD_SHARDS", "true").
 		WithWeaviateEnv("MEMBERLIST_FAST_FAILURE_DETECTION", "false").
+		// USE_INVERTED_SEARCHABLE=false forces new classes to start with the
+		// legacy Map (WAND) strategy so the `rebuild:true` verb has actual
+		// Map→Blockmax migration work to do. Without it the cluster default
+		// (BlockMaxWAND) makes the rebuild a no-op on upstream and a 409
+		// refusal under the submit-time guard added in PR #11327. Every
+		// other reindex_* acceptance package sets this — multinode was
+		// silently mismatched.
+		WithWeaviateEnv("USE_INVERTED_SEARCHABLE", "false").
 		Start(ctx)
 	if err != nil {
 		if compose != nil {

@@ -62,7 +62,7 @@ import (
 	clientbackups "github.com/weaviate/weaviate/client/backups"
 	"github.com/weaviate/weaviate/client/batch"
 	"github.com/weaviate/weaviate/entities/models"
-	"github.com/weaviate/weaviate/test/acceptance/helpers/reindex"
+	reindexhelpers "github.com/weaviate/weaviate/test/acceptance/helpers/reindex"
 	"github.com/weaviate/weaviate/test/docker"
 	"github.com/weaviate/weaviate/test/helper"
 	moduleshelper "github.com/weaviate/weaviate/test/helper/modules"
@@ -82,6 +82,13 @@ func TestBackupVsReindexSuite(t *testing.T) {
 		// quickly enough for the "backup succeeds after migration
 		// finishes" assertion to fit in the test timeout.
 		WithWeaviateEnv("DISTRIBUTED_TASKS_SCHEDULER_TICK_INTERVAL_SECONDS", "1").
+		// USE_INVERTED_SEARCHABLE=false forces new classes to start with the
+		// legacy Map (WAND) strategy so the `rebuild:true` verb has actual
+		// Map→Blockmax migration work to do. Without it the cluster default
+		// (BlockMaxWAND) makes the rebuild a no-op and the submit-time guard
+		// added in this PR refuses it with 409. Consistent with all other
+		// reindex_* acceptance packages.
+		WithWeaviateEnv("USE_INVERTED_SEARCHABLE", "false").
 		Start(ctx)
 	require.NoError(t, err)
 	defer func() {
@@ -775,6 +782,30 @@ func testAlgorithmVerb(t *testing.T, restURI string) {
 
 	url := fmt.Sprintf("http://%s/v1/schema/%s/indexes/%s", restURI, className, propName)
 
+	// Pre-step: migrate to BlockMaxWAND. The cluster runs with
+	// USE_INVERTED_SEARCHABLE=false so the class is created with the
+	// legacy Map (WAND) strategy. The refusal cases below assert
+	// behaviour on an ALREADY-blockmax class, so we first take this
+	// property through the legitimate Map→Blockmax migration.
+	// AwaitReindexFinished blocks until the task reaches FINISHED.
+	preTaskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, propName,
+		`{"searchable":{"rebuild":true}}`)
+	reindexhelpers.AwaitReindexFinished(t, restURI, preTaskID,
+		reindexhelpers.WithTimeout(60*time.Second))
+
+	// Snapshot tasks AFTER the legitimate pre-migration. The three
+	// refusal cases that follow MUST NOT add any new DTM task; the
+	// only task naming this class at the end should still be
+	// preTaskID, in FINISHED state. The original assertion ("no task
+	// for this class") was valid when the class came up
+	// default-blockmax (no pre-migration needed); under
+	// USE_INVERTED_SEARCHABLE=false we exchange that for the
+	// stronger "no NEW task added by the refused submits" form.
+	preTasksResp, err := http.Get(fmt.Sprintf("http://%s/v1/tasks", restURI))
+	require.NoError(t, err)
+	preTasksBytes, _ := io.ReadAll(preTasksResp.Body)
+	_ = preTasksResp.Body.Close()
+
 	// Case 1: already-blockmax + algorithm:"BlockMaxWAND" → 409.
 	req, err := http.NewRequest(http.MethodPut, url,
 		bytes.NewReader([]byte(`{"searchable":{"algorithm":"BlockMaxWAND"}}`)))
@@ -830,18 +861,21 @@ func testAlgorithmVerb(t *testing.T, restURI string) {
 	assert.Contains(t, string(bodyBytes), "not supported",
 		"400 body must explain the rejection")
 
-	// Verify no DTM task is left behind in any of the three paths.
-	// Pre-guard, the BlockMaxWAND submission would have scheduled a
-	// repair-searchable task and crashed it mid-flight. With the
-	// guard, no task is created. GET /v1/tasks must be empty for
-	// this class.
-	resp2, err := http.Get(fmt.Sprintf("http://%s/v1/tasks", restURI))
+	// Verify no NEW DTM task was scheduled by the three refused
+	// submits. Pre-guard, the BlockMaxWAND/rebuild submissions would
+	// have scheduled fresh repair-searchable tasks and crashed them
+	// mid-flight (B7's original failure mode). With the submit-time
+	// guard the only task naming this class is preTaskID (the
+	// legitimate pre-migration) — the post-snapshot tasks payload
+	// must equal the pre-snapshot bytewise.
+	postTasksResp, err := http.Get(fmt.Sprintf("http://%s/v1/tasks", restURI))
 	require.NoError(t, err)
-	defer resp2.Body.Close()
-	tasksBody, err := io.ReadAll(resp2.Body)
+	defer postTasksResp.Body.Close()
+	postTasksBytes, err := io.ReadAll(postTasksResp.Body)
 	require.NoError(t, err)
-	assert.NotContains(t, string(tasksBody), className,
-		"refused submits must not schedule any DTM task; tasks body should not name the class. Got: %s", string(tasksBody))
+	assert.JSONEq(t, string(preTasksBytes), string(postTasksBytes),
+		"refused submits must not schedule any new DTM task. preTaskID=%s. pre=%s post=%s",
+		preTaskID, string(preTasksBytes), string(postTasksBytes))
 }
 
 // testMutationGuardBlocksDeleteClassDuringInFlight pins the upstream
