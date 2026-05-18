@@ -958,7 +958,13 @@ func (s *Searcher) extractContains(ctx context.Context,
 	out.children = children
 	out.Class = class
 
-	nested := len(children) > 0 && children[0].nested.isNested
+	// Nested detection covers both direct leaves (isNested=true) and tokenization
+	// wrappers produced by buildNestedTextFilterPair for multi-token text values
+	// (isWithinRootSubtree=true, childrenFromTokenization=true, isNested=false).
+	// Without the isWithinRootSubtree branch, a nested ContainsAll/Any/None on a
+	// multi-token text value would misclassify as non-nested and lose operator
+	// identity / reintroduce the ContainsNone universe-leak.
+	nested := len(children) > 0 && (children[0].nested.isNested || children[0].nested.isWithinRootSubtree)
 
 	switch operator {
 	case filters.ContainsAll:
