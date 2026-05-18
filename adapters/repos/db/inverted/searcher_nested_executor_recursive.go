@@ -67,9 +67,9 @@ type recExecutor struct {
 	returnMasked   bool
 	// props is the nested schema of the root property the executor operates
 	// on. Used by collectFlatSubtree to identify scalar-array (text[], int[],
-	// …) here paths — those values get distinct leaves per element from
-	// walkScalarArray and break the inheritance bridge that flat raw AndAll
-	// relies on.
+	// uuid[], …) here paths — those values get distinct leaves per element
+	// from walkScalarArray and break the inheritance bridge that flat raw
+	// AndAll relies on.
 	props []*models.NestedProperty
 }
 
@@ -293,8 +293,8 @@ type flatSubtree struct {
 //     over duplicates over-rejects, even within the same physical element)
 //   - any group with ≥2 subs (sibling sub-arrays produce conditions at
 //     distinct leaves with no inheritance bridge — raw AndAll fails)
-//   - any here condition on a scalar-array (text[], int[], …) path. These
-//     values are written by walkScalarArray with one leaf per element
+//   - any here condition on a scalar-array (text[], int[], uuid[], …) path.
+//     These values are written by walkScalarArray with one leaf per element
 //     (assign.go), so they don't share leaves via Phase-3 inheritance with
 //     other conditions.
 //   - more than one group below the root carrying here conditions. A
@@ -351,7 +351,7 @@ func (e *recExecutor) collectFlatSubtree(g *recGroupNode) (*flatSubtree, bool) {
 
 // pathTerminalIsScalarArray reports whether path's terminal property in the
 // nested schema is a scalar-array type (text[], int[], number[], boolean[],
-// date[]).
+// date[], uuid[]).
 func (e *recExecutor) pathTerminalIsScalarArray(path string) bool {
 	if path == "" {
 		return false
