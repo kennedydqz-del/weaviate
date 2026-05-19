@@ -725,8 +725,8 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 		// triggered it.
 		if err := repo.AuditOrphanReindexTrackersIfReady(context.Background()); err != nil {
 			appState.Logger.WithField("action", "reindex_orphan_audit_post_class_dir_restore").
-				WithField("class", class).WithError(err).
-				Warn("reindex orphan audit failed after class-dir restore; the next process restart will retry")
+				WithField("class", class).
+				Warnf("reindex orphan audit failed after class-dir restore; the next process restart will retry: %v", err)
 		}
 		return nil
 	}
@@ -1021,8 +1021,8 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 				// legitimate in-flight migration whose snapshot we
 				// couldn't read. The audit retries on the next process
 				// restart.
-				appState.Logger.WithError(err).WithField("action", "reindex_orphan_audit").
-					Warn("reindex orphan audit: cannot list DTM tasks; treating all trackers as known (audit deferred to next restart)")
+				appState.Logger.WithField("action", "reindex_orphan_audit").
+					Warnf("reindex orphan audit: cannot list DTM tasks; treating all trackers as known (audit deferred to next restart): %v", err)
 				return true
 			}
 			for _, task := range tasksByNamespace[db.ReindexNamespace] {
@@ -1033,8 +1033,8 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 			return false
 		}
 		if err := repo.AuditOrphanReindexTrackers(auditCtx, knownTask, appState.Logger); err != nil {
-			appState.Logger.WithError(err).WithField("action", "startup").
-				Warn("reindex orphan audit did not run cleanly; restored clusters may retain orphan sidecar buckets")
+			appState.Logger.WithField("action", "startup").
+				Warnf("reindex orphan audit did not run cleanly; restored clusters may retain orphan sidecar buckets: %v", err)
 		}
 
 		// Install the audit deps on DB so the on-demand

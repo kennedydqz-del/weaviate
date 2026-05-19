@@ -166,8 +166,8 @@ func (db *DB) AuditOrphanReindexTrackers(ctx context.Context, knownTask KnownRei
 		if os.IsNotExist(err) {
 			return nil
 		}
-		auditLogger.WithField("path", rootPath).WithError(err).
-			Warn("reindex orphan audit: cannot read root path; skipping audit")
+		auditLogger.WithField("path", rootPath).
+			Warnf("reindex orphan audit: cannot read root path; skipping audit: %v", err)
 		return nil
 	}
 
@@ -319,14 +319,14 @@ func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans
 	pauseCtx, cancelPause := context.WithTimeout(ctx, orphanCleanupPauseTimeout)
 	defer cancelPause()
 	if err := shard.store.PauseCompaction(pauseCtx); err != nil {
-		logger.WithField("collection", orphans[0].collection).WithField("shard", orphans[0].shardName).WithError(err).
-			Warn("reindex orphan audit: failed to pause compaction on shard; skipping all orphan cleanups on this shard (next restart will retry)")
+		logger.WithField("collection", orphans[0].collection).WithField("shard", orphans[0].shardName).
+			Warnf("reindex orphan audit: failed to pause compaction on shard; skipping all orphan cleanups on this shard (next restart will retry): %v", err)
 		return 0
 	}
 	defer func() {
 		if err := shard.store.ResumeCompaction(context.Background()); err != nil {
-			logger.WithField("shard", orphans[0].shardName).WithError(err).
-				Warn("reindex orphan audit: failed to resume compaction after orphan cleanup; the next restart will resume it naturally")
+			logger.WithField("shard", orphans[0].shardName).
+				Warnf("reindex orphan audit: failed to resume compaction after orphan cleanup; the next restart will resume it naturally: %v", err)
 		}
 	}()
 
@@ -336,8 +336,8 @@ func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans
 		logger.WithField("orphan", o.String()).
 			Warn("reindex orphan audit: found tracker for unknown task (typically backup-restore of a pre-#215-fix payload); quarantining sidecar bucket + tracker dir")
 		if err := db.cleanupOrphanTrackerCompactionPaused(ctx, shard, o, logger); err != nil {
-			logger.WithField("orphan", o.String()).WithError(err).
-				Warn("reindex orphan audit: cleanup failed for tracker; manual intervention may be required to reclaim the disk space")
+			logger.WithField("orphan", o.String()).
+				Warnf("reindex orphan audit: cleanup failed for tracker; manual intervention may be required to reclaim the disk space: %v", err)
 			continue
 		}
 		cleaned++
@@ -365,8 +365,8 @@ func cleanUnloadedShardOrphans(lsmPath string, orphans []orphanReindexTracker, l
 			Warn("reindex orphan audit: found tracker for unknown task on unloaded shard (post-restore window); removing tracker dir + sidecar dirs from disk")
 		trackerPath := filepath.Join(lsmPath, ".migrations", o.dirName)
 		if err := os.RemoveAll(trackerPath); err != nil {
-			logger.WithField("orphan", o.String()).WithError(err).
-				Warn("reindex orphan audit: failed to remove orphan tracker dir; manual intervention may be required")
+			logger.WithField("orphan", o.String()).
+				Warnf("reindex orphan audit: failed to remove orphan tracker dir; manual intervention may be required: %v", err)
 			continue
 		}
 		removeUnloadedSidecarsForOrphan(lsmPath, o, logger)
@@ -423,8 +423,8 @@ func removeUnloadedSidecarsForOrphan(lsmPath string, o *orphanReindexTracker, lo
 			}
 			path := filepath.Join(lsmPath, name)
 			if err := os.RemoveAll(path); err != nil {
-				logger.WithField("path", path).WithError(err).
-					Warn("reindex orphan audit: failed to remove orphan sidecar dir; manual intervention may be required")
+				logger.WithField("path", path).
+					Warnf("reindex orphan audit: failed to remove orphan sidecar dir; manual intervention may be required: %v", err)
 			}
 		}
 	}
