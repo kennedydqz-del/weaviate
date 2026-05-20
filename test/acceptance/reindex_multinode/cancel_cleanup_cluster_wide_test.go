@@ -129,14 +129,31 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 	// stop reproducing on fast hardware (migration finishes first).
 	awaitTaskStartedFast(t, uri, taskID, 30*time.Second)
 
-	cancelReindexProperty(t, uri, className, propName, "searchable")
-	t.Logf("issued cancel for searchable migration on %s/%s", className, propName)
-
-	// R5a: every replica on every node drains its `.migrations/*_body_*`
-	// dirs within `cancelTimeout`.
 	allShards := collectShardNamesForClass(t, uri, className)
 	require.GreaterOrEqual(t, len(allShards), 3,
 		"sanity: expected ≥3 shards on a 3-shard class; got %v", allShards)
+
+	// QA Claude's 20:01Z review on PR #11327: pre-cancel positive
+	// observation. The post-cancel assertions all trivially PASS if
+	// the migration finishes before our cancel HTTP arrives — no
+	// `.migrations/` dirs, backup succeeds, DELETE succeeds, and the
+	// `defer wg.Wait()` fix isn't even exercised. Pinning ≥1 mid-flight
+	// tracker on disk before the cancel turns "test passes for the
+	// right reason" into an enforceable invariant. A future runner
+	// that closes the race window from the data side (e.g. compiler
+	// optimizations on a much faster CPU) will fail loudly here
+	// instead of silently shipping a no-op test.
+	preCancelSurvivors := scanBodyMigrationsAllReplicas(ctx, t, compose, classDirLower, allShards, propName)
+	require.NotEmptyf(t, preCancelSurvivors,
+		"sanity: expected at least 1 .migrations/*_%s_* dir on disk mid-flight before cancel; got 0 — migration likely finished before cancel reached the cluster, so the post-cancel R5/R6 assertions would PASS trivially without exercising the fix",
+		propName)
+
+	cancelReindexProperty(t, uri, className, propName, "searchable")
+	t.Logf("issued cancel for searchable migration on %s/%s (pre-cancel survivors: %d)",
+		className, propName, len(preCancelSurvivors))
+
+	// R5a: every replica on every node drains its `.migrations/*_body_*`
+	// dirs within `cancelTimeout`.
 
 	deadline := time.Now().Add(cancelTimeout)
 	for {
