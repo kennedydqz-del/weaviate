@@ -276,7 +276,18 @@ func (p *ReindexProvider) processUnits(
 ) {
 	limiter := distributedtask.NewConcurrencyLimiter(p.concurrency())
 
+	// defer Wait so cancel-while-Acquire-blocked still drains spawned
+	// per-unit goroutines before this function returns. Without the
+	// defer, the early `return` on limiter.Acquire ctx-cancel exited
+	// the function while spawned goroutines kept writing to
+	// `.migrations/` — racing the cluster-wide cancel-cleanup that
+	// fires from OnTaskCompleted as soon as the handle's doneCh
+	// closes. QA Claude's #11327 17:35:23Z repro: 2 of 3 shard
+	// replicas on the affected node retained `started.mig` because
+	// the cleanup ran before the per-unit goroutines that owned them
+	// had exited.
 	var wg sync.WaitGroup
+	defer wg.Wait()
 	for _, unitID := range localUnits {
 		unit := task.Units[unitID]
 		if unit != nil && (unit.Status == distributedtask.UnitStatusCompleted || unit.Status == distributedtask.UnitStatusFailed) {
@@ -296,8 +307,6 @@ func (p *ReindexProvider) processUnits(
 			p.processOneUnit(ctx, task, payload, idx, unitID, recorder)
 		}, p.logger)
 	}
-
-	wg.Wait()
 }
 
 // processOneUnit executes reindex on a single unit (shard replica).
