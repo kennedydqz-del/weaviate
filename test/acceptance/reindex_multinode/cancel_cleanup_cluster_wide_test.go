@@ -83,14 +83,6 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 		WithWeaviateEnv("MEMBERLIST_FAST_FAILURE_DETECTION", "false").
 		WithWeaviateEnv("USE_INVERTED_SEARCHABLE", "false").
 		WithWeaviateEnv("REINDEX_CONCURRENCY", "1").
-		// Acceptance-test-only knob (default 0 in production) that slows
-		// per-object reindex iteration. Without it the race window the
-		// `defer wg.Wait()` fix closes is too narrow to observe on
-		// testcontainer hardware. See checkOverrides() in
-		// inverted_reindex_tracker.go. 20 ms × 67k objects per shard =
-		// ~22 min of iteration if uncancelled — generous race window
-		// for cleanup-vs-iteration on the pre-fix code path.
-		WithWeaviateEnv("REINDEX_TESTONLY_PER_OBJECT_DELAY_MS", "20").
 		Start(ctx)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, compose.Terminate(ctx)) }()
@@ -99,35 +91,40 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 	const (
 		className = "CancelClearsAcrossReplicas"
 		propName  = "body"
-		// QA Claude's 20:41Z proposal: a production-side knob
-		// (REINDEX_TESTONLY_PER_OBJECT_DELAY_MS) that defaults to 0 and
-		// can be set in tests to slow per-object iteration. Without it,
-		// 200k objects + 3 shards + concurrency=1 finishes the
-		// iteration faster than the cancel-cleanup race window opens
-		// on testcontainer hardware — the test PASSES on both pre-fix
-		// and post-fix code, which QA's 20:21Z pre/post asymmetry run
-		// proved empirically.
+		// QA Claude's 20:21Z pre/post asymmetry validation showed 200k +
+		// 3 shards + concurrency=1 does NOT reproduce the bug on the
+		// pre-fix image — the test PASSES whether c133b1fd0d's
+		// `defer wg.Wait()` is applied or not, so a future revert
+		// would slip through. The race needs Worker 1's iteration to
+		// be long enough that the post-cancel cleanup catches it
+		// mid-flight.
 		//
-		// 20 ms per-object delay on 200k objects = 4000 s of iteration
-		// budget total. With REINDEX_CONCURRENCY=1 the per-shard
-		// goroutine processes ~67k objects = ~22 min if uncancelled.
-		// Cancel arrives within 1 s of STARTED; the remaining ~22 min
-		// of iteration is the wide-open race window pre-fix cleanup
-		// races against, producing the 2-of-9-replicas `started.mig`
-		// fingerprint QA reported.
-		dataset       = 200_000
+		// Cranking the per-shard work cost: 500k objects + 6 shards =
+		// ~83k per shard, but every value is a 400-byte text body
+		// (vs. the original 5-char path). At ~30 words/object that's
+		// ~5 ms tokenize per object → ~7 min per shard if Worker 1
+		// ran to completion. Cancel fires within 1 s of STARTED; the
+		// remaining ~7 min of iteration is the race window cleanup
+		// can land inside, and the failing pre-fix path leaves a
+		// surviving started.mig (the 2-of-9-replicas fingerprint).
+		dataset       = 500_000
 		cancelTimeout = 60 * time.Second
 	)
+	// 400-byte text body — large enough to materially slow per-object
+	// tokenization vs. a 5-char `alpha`. 30 distinct values still
+	// produce a non-trivial term-space for the migration.
+	textTemplate := strings.Repeat("alpha beta gamma delta epsilon zeta eta theta iota kappa ", 7)
+	require.GreaterOrEqual(t, len(textTemplate), 380,
+		"sanity: text template length below the slow-tokenize threshold")
 	classDirLower := strings.ToLower(className)
 
 	uri := restURIOf(compose, 1)
 	trueVal := true
-	// 3 shards × RF=3 = 9 unit replicas (3 per node). With
-	// REINDEX_CONCURRENCY=1, 2 of every 3 per-node goroutines are
-	// blocked at limiter.Acquire when the cancel arrives. The race
-	// window comes from the PER_OBJECT_DELAY env above, not from
-	// shard count.
-	createCollection(t, uri, className, 3, 3, []*models.Property{
+	// 6 shards × RF=3 = 18 unit replicas (6 per node). With
+	// REINDEX_CONCURRENCY=1, 5 of every 6 per-node goroutines are
+	// blocked at limiter.Acquire when the cancel arrives — wider
+	// blocked-Acquire window than 3 shards gave.
+	createCollection(t, uri, className, 6, 3, []*models.Property{
 		{
 			Name:            propName,
 			DataType:        []string{"text"},
@@ -136,9 +133,11 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 		},
 	})
 
-	paths := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	// Distinct prefix per object keeps the term-space non-trivial.
+	// The 400-byte tail forces 30+ word tokenizations per object.
 	batchImportMultiProp(t, uri, className, dataset, func(i int) map[string]interface{} {
-		return map[string]interface{}{propName: paths[i%len(paths)]}
+		bucket := []string{"alpha", "beta", "gamma", "delta", "epsilon"}[i%5]
+		return map[string]interface{}{propName: bucket + " " + textTemplate}
 	})
 
 	// Submit word→field. Tokenization-changing migration → both

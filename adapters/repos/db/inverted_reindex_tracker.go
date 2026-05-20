@@ -596,27 +596,10 @@ func (t *fileReindexTracker) GetTimes() map[string]string {
 }
 
 func (t *fileReindexTracker) checkOverrides(logger logrus.FieldLogger, config *reindexTaskConfig) {
-	if config == nil {
+	if !t.fileExists(t.config.filenameOverrides) {
 		return
 	}
-
-	// Acceptance-test-only knob: REINDEX_TESTONLY_PER_OBJECT_DELAY_MS
-	// applies on top of the per-shard overrides.mig file. Used by
-	// TestMultiNode_CancelClearsAcrossReplicas to deterministically
-	// extend the per-object iteration so the cleanup-race window the
-	// `defer wg.Wait()` fix (weaviate/weaviate#11327) closes is
-	// observable on testcontainer hardware. Default 0 = no behaviour
-	// change for production. Name is loud ("TESTONLY") to discourage
-	// operator tuning.
-	if env := os.Getenv("REINDEX_TESTONLY_PER_OBJECT_DELAY_MS"); env != "" {
-		if ms, err := strconv.Atoi(env); err == nil && ms > 0 {
-			config.perObjectDelay = time.Duration(ms) * time.Millisecond
-			logger.WithField("per_object_delay_ms", ms).
-				Info("reindex provider: REINDEX_TESTONLY_PER_OBJECT_DELAY_MS applied")
-		}
-	}
-
-	if !t.fileExists(t.config.filenameOverrides) {
+	if config == nil {
 		return
 	}
 	content, err := os.ReadFile(t.filepath(t.config.filenameOverrides))
