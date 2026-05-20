@@ -855,17 +855,22 @@ func testMutationGuardBlocksDeleteClassDuringInFlight(t *testing.T, restURI stri
 }
 
 // testCancelClearsTrackerDirsViaOnTaskCompleted exercises the
-// cluster-wide cancel-cleanup dispatch added in 96fab565e7. A migration
-// is submitted, allowed to reach STARTED, then cancelled via the
-// documented REST verb. The contract: within a few scheduler ticks,
-// every `.migrations/<prefix>_body_N/` dir for this migration must be
-// removed from disk on this node — proof that OnTaskCompleted's
-// auto-cleanup branch fires for CANCELLED, not just FAILED.
+// cluster-wide cancel-cleanup dispatch added in 96fab565e7 AND the
+// follow-on class-delete teardown. Two contracts pinned:
 //
-// Pre-#11327 (cb5c6e3f53 onwards) only fired auto-cleanup on FAILED.
-// QA Claude's reindex-qa repro (17:03:34Z) showed cancel-cleanup
-// running on exactly one pod per 3-node cluster; this subtest
-// reproduces the single-node slice of that bug.
+//  1. Cancel → auto-cleanup fires within a few scheduler ticks →
+//     `.migrations/<prefix>_body_N/` is gone on disk. Pre-#11327
+//     (cb5c6e3f53 onwards) only fired on FAILED. QA Claude's
+//     reindex-qa repro (17:03:34Z) showed cancel-cleanup running on
+//     exactly one pod per 3-node cluster; this subtest reproduces
+//     the single-node slice. The multi-node cluster-wide aspect is
+//     pinned by TestMultiScheduler_CancelledTaskFiresOnTaskCompletedOnEveryNode
+//     at unit-test speed.
+//  2. DELETE class after the cancelled-task has reached CANCELLED is
+//     allowed (MutationGuard treats terminal-state tasks as
+//     not-in-flight) and leaves no on-disk class dir behind — the
+//     scenario at the root of QA Claude's "migrations dirs survive
+//     delete collection" finding.
 func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Context, compose *docker.DockerCompose, restURI string) {
 	const (
 		className = "ReindexBackup_CancelCleanup"
@@ -878,7 +883,14 @@ func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Con
 		},
 		Vectorizer: "none",
 	})
-	defer helper.DeleteClass(t, className)
+	// The test itself drives the final DELETE so we can probe the
+	// class dir state afterwards. Defer cleans up on aborted runs.
+	deletedByTest := false
+	defer func() {
+		if !deletedByTest {
+			helper.DeleteClass(t, className)
+		}
+	}()
 
 	// 50k rows keeps the iteration STARTED long enough to win the race
 	// against the cancel HTTP call.
@@ -890,7 +902,6 @@ func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Con
 
 	awaitIndexingState(t, restURI, className, propName)
 
-	// Cancel via the documented verb.
 	cancelURL := fmt.Sprintf("http://%s/v1/schema/%s/indexes/%s", restURI, className, propName)
 	req, err := http.NewRequest(http.MethodPut, cancelURL,
 		bytes.NewReader([]byte(`{"searchable":{"cancel":true}}`)))
@@ -903,16 +914,16 @@ func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Con
 	require.Equalf(t, http.StatusAccepted, resp.StatusCode,
 		"cancel must return 202; got %d: %s", resp.StatusCode, string(cancelBody))
 
-	// Probe disk for body-related tracker dirs. The cleanup runs
-	// asynchronously on the scheduler tick + auto-cleanup drain; poll
-	// the .migrations/ tree until every matching dir is gone.
 	shardName := reindexhelpers.GetFirstShardName(t, restURI, className)
 	lsmPath := fmt.Sprintf("/data/%s/%s/lsm", strings.ToLower(className), shardName)
 	migsPath := lsmPath + "/.migrations"
 	container := compose.GetWeaviate().Container()
+	classPath := fmt.Sprintf("/data/%s", strings.ToLower(className))
+
+	// Contract 1 — poll the .migrations/ tree until every body-related
+	// dir is gone. Cleanup runs async on the scheduler tick.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		// ls -1 .migrations/ — list bare entries, filter to body-related.
 		code, reader, execErr := container.Exec(ctx, []string{
 			"sh", "-c",
 			fmt.Sprintf(`ls -1 %s 2>/dev/null | grep -E '_%s($|_)' | head -10`, migsPath, propName),
@@ -923,10 +934,10 @@ func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Con
 			_, _ = io.Copy(out, reader)
 		}
 		matches := strings.TrimSpace(out.String())
+		// grep exit 0 + empty stdout: matched nothing (shouldn't happen,
+		// but be permissive). grep exit 1: no match → cleanup done.
 		if code != 0 || matches == "" {
-			// 0 + empty = grep matched nothing → cleanup done.
-			// non-zero (grep exit 1 = no match) → cleanup done.
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("cancel-cleanup did not remove %s/.migrations/*_%s_* within 30s; survivors:\n%s",
@@ -934,6 +945,31 @@ func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Con
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+
+	// Contract 2 — DELETE the class. With MutationGuard's IsActive()
+	// gate (STARTED/PREPARING/SWAPPING only), a CANCELLED task does
+	// NOT block delete.
+	deleteURL := fmt.Sprintf("http://%s/v1/schema/%s", restURI, className)
+	delReq, err := http.NewRequest(http.MethodDelete, deleteURL, nil)
+	require.NoError(t, err)
+	delResp, err := http.DefaultClient.Do(delReq)
+	require.NoError(t, err)
+	delBody, _ := io.ReadAll(delResp.Body)
+	_ = delResp.Body.Close()
+	require.Equalf(t, http.StatusOK, delResp.StatusCode,
+		"DELETE class after CANCELLED task must succeed; got %d: %s",
+		delResp.StatusCode, string(delBody))
+	deletedByTest = true
+
+	// On-disk class dir must be gone. `test -d` returns 0 if present,
+	// 1 if absent — we want 1.
+	code, _, execErr := container.Exec(ctx, []string{"test", "-d", classPath})
+	require.NoError(t, execErr)
+	require.Equalf(t, 1, code,
+		"class dir %s must be removed by DELETE; got test -d exit %d",
+		classPath, code)
+
+	_ = taskID // kept for the log line above; cascade-delete coverage is in #11345's unit tests.
 }
 
 // backupAndRestoreRoundTrip creates a filesystem backup, deletes the
