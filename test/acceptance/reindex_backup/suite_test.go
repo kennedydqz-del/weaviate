@@ -199,6 +199,19 @@ func TestBackupVsReindexSuite(t *testing.T) {
 	t.Run("MutationGuardBlocksDeleteClassDuringInFlight", func(t *testing.T) {
 		testMutationGuardBlocksDeleteClassDuringInFlight(t, compose.GetWeaviate().URI())
 	})
+
+	// QA Claude's empirical repro on #11327 (17:03:34Z): cancel of an
+	// in-flight migration left .migrations/<prefix>_body_N/ dirs on
+	// disk because OnTaskCompleted never fired for CANCELLED — only
+	// the REST node's inline cleanup ran. After the cluster-wide
+	// dispatch fix in 96fab565e7, every node fires the cleanup
+	// callback and the tracker tree drains within a few scheduler
+	// ticks. Single-node testcontainer exercises the dispatch side of
+	// the fix end-to-end; the multi-node aspect lives in the unit
+	// test TestMultiScheduler_CancelledTaskFiresOnTaskCompletedOnEveryNode.
+	t.Run("CancelClearsTrackerDirsViaOnTaskCompleted", func(t *testing.T) {
+		testCancelClearsTrackerDirsViaOnTaskCompleted(t, ctx, compose, compose.GetWeaviate().URI())
+	})
 }
 
 // testBaselineBackupRoundTrip creates a class with no migration in flight,
@@ -839,6 +852,88 @@ func testMutationGuardBlocksDeleteClassDuringInFlight(t *testing.T, restURI stri
 	require.Equal(t, http.StatusOK, resp.StatusCode,
 		"post-tidied DELETE must succeed; got %d", resp.StatusCode)
 	deletedByTest = true
+}
+
+// testCancelClearsTrackerDirsViaOnTaskCompleted exercises the
+// cluster-wide cancel-cleanup dispatch added in 96fab565e7. A migration
+// is submitted, allowed to reach STARTED, then cancelled via the
+// documented REST verb. The contract: within a few scheduler ticks,
+// every `.migrations/<prefix>_body_N/` dir for this migration must be
+// removed from disk on this node — proof that OnTaskCompleted's
+// auto-cleanup branch fires for CANCELLED, not just FAILED.
+//
+// Pre-#11327 (cb5c6e3f53 onwards) only fired auto-cleanup on FAILED.
+// QA Claude's reindex-qa repro (17:03:34Z) showed cancel-cleanup
+// running on exactly one pod per 3-node cluster; this subtest
+// reproduces the single-node slice of that bug.
+func testCancelClearsTrackerDirsViaOnTaskCompleted(t *testing.T, ctx context.Context, compose *docker.DockerCompose, restURI string) {
+	const (
+		className = "ReindexBackup_CancelCleanup"
+		propName  = "body"
+	)
+	helper.CreateClass(t, &models.Class{
+		Class: className,
+		Properties: []*models.Property{
+			{Name: propName, DataType: []string{"text"}, Tokenization: "word"},
+		},
+		Vectorizer: "none",
+	})
+	defer helper.DeleteClass(t, className)
+
+	// 50k rows keeps the iteration STARTED long enough to win the race
+	// against the cancel HTTP call.
+	importBodies(t, className, 50_000)
+
+	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, propName,
+		`{"searchable":{"tokenization":"lowercase"}}`)
+	t.Logf("cancel-cleanup probe task submitted: %s", taskID)
+
+	awaitIndexingState(t, restURI, className, propName)
+
+	// Cancel via the documented verb.
+	cancelURL := fmt.Sprintf("http://%s/v1/schema/%s/indexes/%s", restURI, className, propName)
+	req, err := http.NewRequest(http.MethodPut, cancelURL,
+		bytes.NewReader([]byte(`{"searchable":{"cancel":true}}`)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	cancelBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equalf(t, http.StatusAccepted, resp.StatusCode,
+		"cancel must return 202; got %d: %s", resp.StatusCode, string(cancelBody))
+
+	// Probe disk for body-related tracker dirs. The cleanup runs
+	// asynchronously on the scheduler tick + auto-cleanup drain; poll
+	// the .migrations/ tree until every matching dir is gone.
+	shardName := reindexhelpers.GetFirstShardName(t, restURI, className)
+	lsmPath := fmt.Sprintf("/data/%s/%s/lsm", strings.ToLower(className), shardName)
+	migsPath := lsmPath + "/.migrations"
+	container := compose.GetWeaviate().Container()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		// ls -1 .migrations/ — list bare entries, filter to body-related.
+		code, reader, execErr := container.Exec(ctx, []string{
+			"sh", "-c",
+			fmt.Sprintf(`ls -1 %s 2>/dev/null | grep -E '_%s($|_)' | head -10`, migsPath, propName),
+		})
+		require.NoError(t, execErr)
+		out := new(strings.Builder)
+		if reader != nil {
+			_, _ = io.Copy(out, reader)
+		}
+		matches := strings.TrimSpace(out.String())
+		if code != 0 || matches == "" {
+			// 0 + empty = grep matched nothing → cleanup done.
+			// non-zero (grep exit 1 = no match) → cleanup done.
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancel-cleanup did not remove %s/.migrations/*_%s_* within 30s; survivors:\n%s",
+				lsmPath, propName, matches)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // backupAndRestoreRoundTrip creates a filesystem backup, deletes the
