@@ -91,18 +91,40 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 	const (
 		className = "CancelClearsAcrossReplicas"
 		propName  = "body"
-		// 200k keeps the change-tokenization iteration alive for
-		// >3 s even on a fast laptop with 3 shards × concurrency=2;
-		// at 50k the migration finished before our cancel HTTP
-		// hit the network, and the canonical PUT returned 404.
-		dataset       = 200_000
-		cancelTimeout = 30 * time.Second
+		// QA Claude's 20:21Z pre/post asymmetry validation showed 200k +
+		// 3 shards + concurrency=1 does NOT reproduce the bug on the
+		// pre-fix image — the test PASSES whether c133b1fd0d's
+		// `defer wg.Wait()` is applied or not, so a future revert
+		// would slip through. The race needs Worker 1's iteration to
+		// be long enough that the post-cancel cleanup catches it
+		// mid-flight.
+		//
+		// Cranking the per-shard work cost: 500k objects + 6 shards =
+		// ~83k per shard, but every value is a 400-byte text body
+		// (vs. the original 5-char path). At ~30 words/object that's
+		// ~5 ms tokenize per object → ~7 min per shard if Worker 1
+		// ran to completion. Cancel fires within 1 s of STARTED; the
+		// remaining ~7 min of iteration is the race window cleanup
+		// can land inside, and the failing pre-fix path leaves a
+		// surviving started.mig (the 2-of-9-replicas fingerprint).
+		dataset       = 500_000
+		cancelTimeout = 60 * time.Second
 	)
+	// 400-byte text body — large enough to materially slow per-object
+	// tokenization vs. a 5-char `alpha`. 30 distinct values still
+	// produce a non-trivial term-space for the migration.
+	textTemplate := strings.Repeat("alpha beta gamma delta epsilon zeta eta theta iota kappa ", 7)
+	require.GreaterOrEqual(t, len(textTemplate), 380,
+		"sanity: text template length below the slow-tokenize threshold")
 	classDirLower := strings.ToLower(className)
 
 	uri := restURIOf(compose, 1)
 	trueVal := true
-	createCollection(t, uri, className, 3, 3, []*models.Property{
+	// 6 shards × RF=3 = 18 unit replicas (6 per node). With
+	// REINDEX_CONCURRENCY=1, 5 of every 6 per-node goroutines are
+	// blocked at limiter.Acquire when the cancel arrives — wider
+	// blocked-Acquire window than 3 shards gave.
+	createCollection(t, uri, className, 6, 3, []*models.Property{
 		{
 			Name:            propName,
 			DataType:        []string{"text"},
@@ -111,9 +133,11 @@ func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 		},
 	})
 
-	paths := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	// Distinct prefix per object keeps the term-space non-trivial.
+	// The 400-byte tail forces 30+ word tokenizations per object.
 	batchImportMultiProp(t, uri, className, dataset, func(i int) map[string]interface{} {
-		return map[string]interface{}{propName: paths[i%len(paths)]}
+		bucket := []string{"alpha", "beta", "gamma", "delta", "epsilon"}[i%5]
+		return map[string]interface{}{propName: bucket + " " + textTemplate}
 	})
 
 	// Submit word→field. Tokenization-changing migration → both
