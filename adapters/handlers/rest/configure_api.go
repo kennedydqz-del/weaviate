@@ -1014,21 +1014,22 @@ func MakeAppState(ctx, serverShutdownCtx context.Context, options *swag.CommandL
 		knownTask := func(taskID string, taskVersion uint64) bool {
 			tasksByNamespace, err := appState.ClusterService.ListDistributedTasks(auditCtx)
 			if err != nil {
-				// Treat list-failure as "DTM is unavailable, every task
-				// is potentially in-flight" — i.e. DO NOT quarantine.
-				// Returning true here is the conservative classification:
-				// it leaves orphans in place rather than wiping a
-				// legitimate in-flight migration whose snapshot we
-				// couldn't read. The audit retries on the next process
-				// restart.
+				// List-failure ≡ "DTM is unavailable, every task is
+				// potentially in-flight" — keep orphans rather than wipe
+				// a legitimate in-flight migration whose snapshot we
+				// couldn't read. The audit retries on the next restart.
 				appState.Logger.WithField("action", "reindex_orphan_audit").
 					Warnf("reindex orphan audit: cannot list DTM tasks; treating all trackers as known (audit deferred to next restart): %v", err)
 				return true
 			}
 			for _, task := range tasksByNamespace[db.ReindexNamespace] {
-				if task.ID == taskID && task.Version == taskVersion {
-					return true
+				if task.ID != taskID || task.Version != taskVersion {
+					continue
 				}
+				// Terminal-state tasks release tracker ownership so the
+				// audit can reap stragglers the eager OnTaskCompleted
+				// cleanup missed — see [db.IsLiveReindexTaskStatus].
+				return db.IsLiveReindexTaskStatus(task.Status)
 			}
 			return false
 		}

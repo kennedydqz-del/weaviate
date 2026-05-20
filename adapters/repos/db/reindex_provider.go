@@ -1418,12 +1418,25 @@ func (p *ReindexProvider) OnTaskCompleted(task *distributedtask.Task) {
 
 	if task.Status != distributedtask.TaskStatusSwapping {
 		// Non-SWAPPING terminal/in-flight: no cluster-wide schema flip.
-		// On FAILED we emit the operator repair guidance AND
-		// auto-cleanup partial sidecar state — closes
-		// weaviate/0-weaviate-issues#215 B6 (no operator cleanup verb).
-		if task.Status == distributedtask.TaskStatusFailed && payloadErr == nil {
-			logOperatorRepairGuidanceOnFailedSemanticMigration(logger, payload)
-			p.autoCleanupAfterFailure(task, payload, logger)
+		// On FAILED + CANCELLED we auto-cleanup partial sidecar state on
+		// every node — closes weaviate/0-weaviate-issues#215 B6 (no
+		// operator cleanup verb). FAILED additionally logs the operator
+		// repair guidance for the bucket↔schema-inversion family.
+		if payloadErr == nil {
+			switch task.Status {
+			case distributedtask.TaskStatusFailed:
+				logOperatorRepairGuidanceOnFailedSemanticMigration(logger, payload)
+				p.autoCleanupAfterTerminal(task, payload, logger)
+			case distributedtask.TaskStatusCancelled:
+				p.autoCleanupAfterTerminal(task, payload, logger)
+			case distributedtask.TaskStatusStarted,
+				distributedtask.TaskStatusPreparing,
+				distributedtask.TaskStatusSwapping,
+				distributedtask.TaskStatusFinished:
+				// SWAPPING is handled below; STARTED / PREPARING never
+				// reach OnTaskCompleted; FINISHED uses the swap pipeline's
+				// markTidied — no eager cleanup needed.
+			}
 		}
 		return
 	}
@@ -1469,41 +1482,64 @@ func (p *ReindexProvider) OnTaskCompleted(task *distributedtask.Task) {
 	}
 }
 
-// On a FAILED semantic migration: drain any still-running local
-// goroutines, then wipe partial sidecar state per (property, indexType).
-// The next failed/cancelled migration leaves no state for operators to
-// chase. Errors are logged and swallowed — the next-restart audit will
-// pick anything up that this missed.
-func (p *ReindexProvider) autoCleanupAfterFailure(task *distributedtask.Task, payload *ReindexTaskPayload, logger logrus.FieldLogger) {
-	drainCtx, drainCancel := context.WithTimeout(p.serverCtx, reindexFailedCleanupDrainTimeout)
+// autoCleanupAfterTerminal runs on every node when a semantic migration
+// reaches FAILED or CANCELLED. Drains any still-running local goroutine,
+// then wipes partial sidecar state per (property, indexType) so neither
+// the operator nor the next-restart audit has to chase orphans.
+// Errors are logged and swallowed — the next-restart audit catches
+// anything this missed.
+func (p *ReindexProvider) autoCleanupAfterTerminal(task *distributedtask.Task, payload *ReindexTaskPayload, logger logrus.FieldLogger) {
+	drainCtx, drainCancel := context.WithTimeout(p.serverCtx, reindexTerminalCleanupDrainTimeout)
 	defer drainCancel()
 	if err := p.WaitForLocalTaskDrain(drainCtx, task.TaskDescriptor); err != nil {
-		logger.Warnf("auto-cleanup after FAILED: drain did not finish in %s; skipping cleanup (next-restart audit will retry): %v", reindexFailedCleanupDrainTimeout, err)
+		logger.Warnf("auto-cleanup after terminal status: drain did not finish in %s; skipping cleanup (next-restart audit will retry): %v", reindexTerminalCleanupDrainTimeout, err)
 		return
 	}
 	indexTypes := semanticMigrationIndexTypesForAudit(payload.MigrationType)
 	if len(indexTypes) == 0 || len(payload.Properties) == 0 {
 		return
 	}
-	cleanupCtx, cancel := context.WithTimeout(p.serverCtx, reindexFailedCleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(p.serverCtx, reindexTerminalCleanupTimeout)
 	defer cancel()
 	for _, propName := range payload.Properties {
 		for _, indexType := range indexTypes {
 			if err := p.db.CleanStalePartialReindexState(cleanupCtx, payload.Collection, propName, indexType); err != nil {
 				logger.WithField("property", propName).WithField("index_type", indexType).
-					Warnf("auto-cleanup after FAILED migration failed for this tuple (next-restart audit will retry): %v", err)
+					Warnf("auto-cleanup after terminal status failed for this tuple (next-restart audit will retry): %v", err)
 			}
 		}
 	}
-	logger.Info("auto-cleanup after FAILED migration: partial sidecar state cleared on this node")
+	logger.Info("auto-cleanup after terminal status: partial sidecar state cleared on this node")
 }
 
-// Drain budget for the auto-cleanup-after-FAILED path. Matches the cancel
-// handler's drain timeout — see reindexCancelDrainTimeout in REST handlers.
-const reindexFailedCleanupDrainTimeout = 10 * time.Second
+// Drain budget. Matches reindexCancelDrainTimeout in REST handlers so the
+// REST cancel path's drain and this OnTaskCompleted-driven drain
+// converge on identical stuck-task behaviour.
+const reindexTerminalCleanupDrainTimeout = 10 * time.Second
 
 // Cleanup budget per shard (sums across properties × indexTypes).
-const reindexFailedCleanupTimeout = 60 * time.Second
+const reindexTerminalCleanupTimeout = 60 * time.Second
+
+// IsLiveReindexTaskStatus reports whether a task in the given DTM status
+// still owns its on-disk tracker dirs. Live statuses (STARTED, PREPARING,
+// SWAPPING) own them; terminal statuses (FAILED, CANCELLED, FINISHED)
+// release ownership. The orphan-audit closure uses this to classify
+// tracker dirs whose owning task has reached a terminal state — those
+// are stragglers the eager OnTaskCompleted cleanup missed and need
+// defense-in-depth reaping on the next restart.
+func IsLiveReindexTaskStatus(status distributedtask.TaskStatus) bool {
+	switch status {
+	case distributedtask.TaskStatusStarted,
+		distributedtask.TaskStatusPreparing,
+		distributedtask.TaskStatusSwapping:
+		return true
+	case distributedtask.TaskStatusFinished,
+		distributedtask.TaskStatusCancelled,
+		distributedtask.TaskStatusFailed:
+		return false
+	}
+	return false
+}
 
 // logOperatorRepairGuidanceOnFailedSemanticMigration logs the exact REST
 // command an operator should issue to recover from a FAILED semantic

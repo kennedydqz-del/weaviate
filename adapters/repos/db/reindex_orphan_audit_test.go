@@ -22,6 +22,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/weaviate/weaviate/cluster/distributedtask"
 )
 
 // TestAuditOrphanReindexTrackers_NilLookup_Refuses pins the nil-lookup
@@ -292,6 +293,36 @@ func TestAuditOrphanReindexTrackers_NoMigrationsDir(t *testing.T) {
 		config:  Config{RootPath: idx.Config.RootPath},
 	}
 	require.NoError(t, db.AuditOrphanReindexTrackers(ctx, func(string, uint64) bool { return false }, logrus.New()))
+}
+
+// TestIsLiveReindexTaskStatus_TerminalReleasesOwnership pins the
+// status → ownership matrix the audit's knownTask closure uses. STARTED,
+// PREPARING, SWAPPING own the tracker (in-flight migration writes
+// to it); FAILED, CANCELLED, FINISHED release ownership so the audit
+// reaps stragglers the eager OnTaskCompleted cleanup missed. A
+// regression that misclassifies a terminal status as live would leak
+// orphans across a restart; one that misclassifies a live status as
+// terminal would wipe an in-flight migration's working state. Both
+// failure modes are surfaceable from this table.
+func TestIsLiveReindexTaskStatus_TerminalReleasesOwnership(t *testing.T) {
+	cases := []struct {
+		status distributedtask.TaskStatus
+		live   bool
+	}{
+		{distributedtask.TaskStatusStarted, true},
+		{distributedtask.TaskStatusPreparing, true},
+		{distributedtask.TaskStatusSwapping, true},
+		{distributedtask.TaskStatusFinished, false},
+		{distributedtask.TaskStatusFailed, false},
+		{distributedtask.TaskStatusCancelled, false},
+		{distributedtask.TaskStatus("UNKNOWN_FUTURE_STATE"), false},
+		{distributedtask.TaskStatus(""), false},
+	}
+	for _, c := range cases {
+		t.Run(string(c.status), func(t *testing.T) {
+			assert.Equal(t, c.live, IsLiveReindexTaskStatus(c.status))
+		})
+	}
 }
 
 // writePayload is the test-side mirror of
