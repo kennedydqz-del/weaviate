@@ -697,18 +697,25 @@ function run_acceptance_reindex_multinode() {
 function run_acceptance_reindex_multinode_restart_a() {
   build_weaviate_test_image
   echo_green "acceptance — reindex-multinode-restart-a (mid-reindex restarts + post-complete rolling)"
-  # 4 tests:
+  # 6 tests:
   #   TestMultiNode_GracefulRestartDuringReindex
   #   TestMultiNode_CrashDuringReindex
   #   TestMultiNode_MajorityCrashDuringReindex
   #   TestMultiNode_RollingRestartAfterComplete
+  #   TestMultiNode_RollingRestartMidMigration
+  #   TestMultiNode_RollingRestartBetweenMigrations
   #
   # The "restart-during-active-reindex" + "post-complete rolling"
   # bucket. Each test owns its own cluster lifecycle (restart timing
   # IS the journey), so these cannot be folded onto a shared cluster
   # the way the AJ suite can. The split below balances the wall-clock
   # against -restart-b instead.
-  AOF_GROUP_RUN='TestMultiNode_(GracefulRestartDuringReindex|CrashDuringReindex|MajorityCrashDuringReindex|RollingRestartAfterComplete)' \
+  #
+  # Regex caveat: alternation is by exact prefix-anchored name, NOT
+  # substring. `Graceful` does NOT match `GracefulLeaderRestart`. The
+  # tools/ci_shard_audit/audit_test.go invariant catches "added a test
+  # but forgot to wire it into any -run filter" at PR time.
+  AOF_GROUP_RUN='TestMultiNode_(GracefulRestartDuringReindex|CrashDuringReindex|MajorityCrashDuringReindex|RollingRestartAfterComplete|RollingRestartMidMigration|RollingRestartBetweenMigrations)' \
     run_aof_group "reindex-multinode-restart-a" test/acceptance/reindex_multinode
 }
 
