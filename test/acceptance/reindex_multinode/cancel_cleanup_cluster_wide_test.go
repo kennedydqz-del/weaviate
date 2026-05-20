@@ -381,13 +381,7 @@ func createS3Backup(t *testing.T, restURI, className, backupID, bucket string) e
 		return fmt.Errorf("backup create returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// MinIO upload of 200k object × 3-shard class takes ~60-120 s on
-	// testcontainer hardware with the per-object-delay knob enabled
-	// (since the audit/scheduler ticks share the same slowed iteration
-	// loop). 240 s gives headroom for the slow CI runner while still
-	// catching a genuinely-stuck canCommit (the pre-fix shape).
-	const backupWait = 240 * time.Second
-	deadline := time.Now().Add(backupWait)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		r, err := http.Get(fmt.Sprintf("http://%s/v1/backups/s3/%s", restURI, backupID))
 		if err != nil {
@@ -407,7 +401,7 @@ func createS3Backup(t *testing.T, restURI, className, backupID, bucket string) e
 			return fmt.Errorf("backup FAILED: %s", status.Error)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("backup did not reach SUCCESS/FAILED in %s; last status: %s", backupWait, status.Status)
+			return fmt.Errorf("backup did not reach SUCCESS/FAILED in 60s; last status: %s", status.Status)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
