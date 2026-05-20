@@ -841,41 +841,6 @@ func testMutationGuardBlocksDeleteClassDuringInFlight(t *testing.T, restURI stri
 	deletedByTest = true
 }
 
-// readSearchableTokenization reads the current tokenization of a
-// property's searchable index via GET /v1/schema/<class>/indexes.
-// Returns "" if the property has no searchable index. Used by the B6
-// cleanup test to prove the verb does NOT switch tokenization.
-func readSearchableTokenization(t *testing.T, restURI, collection, property string) string {
-	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("http://%s/v1/schema/%s/indexes", restURI, collection))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	var parsed struct {
-		Properties []struct {
-			Name    string `json:"name"`
-			Indexes []struct {
-				Type         string `json:"type"`
-				Tokenization string `json:"tokenization"`
-			} `json:"indexes"`
-		} `json:"properties"`
-	}
-	require.NoError(t, json.Unmarshal(body, &parsed),
-		"unparseable response body: %s", string(body))
-	for _, p := range parsed.Properties {
-		if p.Name != property {
-			continue
-		}
-		for _, idx := range p.Indexes {
-			if idx.Type == "searchable" {
-				return idx.Tokenization
-			}
-		}
-	}
-	return ""
-}
-
 // backupAndRestoreRoundTrip creates a filesystem backup, deletes the
 // class, restores from the backup, and asserts the post-restore count
 // equals the supplied pre-backup count. Used by both the baseline

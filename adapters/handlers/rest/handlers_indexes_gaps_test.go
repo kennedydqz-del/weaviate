@@ -1052,7 +1052,6 @@ func TestValidateBodyExclusivity(t *testing.T) {
 			},
 			wantErr: "conflicting fields in searchable",
 		},
-
 	}
 
 	for _, tc := range cases {
