@@ -28,41 +28,37 @@ import (
 	"github.com/weaviate/weaviate/test/docker"
 )
 
-// TestMultiNode_CancelClearsAcrossReplicas is a cluster-wide
-// **non-regression smoke** for the cancel-cleanup dispatch + drain
-// path on PR #11327's `defer wg.Wait()` fix. NOT a bug-pin: QA
-// Claude's 20:21Z pre/post-asymmetry validation showed the test
-// passes on both pre-fix (`27ddf80b56`) and post-fix (`c133b1fd0d`)
-// code at testcontainer scale, so it cannot catch a future revert
-// of the fix. The canonical bug-pin for R5/R6 lives on the
-// `reindex-qa` dev cluster (k8s, 1M-row class), where the bug
-// surfaces as the 2-of-9-replicas pattern QA documented.
+// TestMultiNode_CancelClearsAcrossReplicas pins the cluster-wide R5/R6
+// invariants for the `defer wg.Wait()` fix in c133b1fd0d on PR #11327.
 //
-// The race the fix closes — processUnits's early-return from
-// ctx-cancelled `limiter.Acquire` skipping `wg.Wait()` — needs a
-// load profile (per-object iteration time × concurrency window)
-// that the testcontainer setup doesn't deterministically produce.
-// Cranking objects/shards/concurrency further didn't open the
-// window reproducibly on standard CI hardware. Suggestions for a
-// proper testcontainer-scale bug-pin are tracked separately.
+// QA Claude's 18:49Z spec on the PR explained why the single-node
+// acceptance tests in b6292060c8 + 27ddf80b56 cannot reproduce the
+// processUnits `limiter.Acquire`-ctx-cancel race: both R5 (cancel
+// leaves `started.mig` on some replicas) and R6 (DELETE class leaves
+// data tree on some node) need
 //
-// What this test DOES cover (smoke level, all on a 3 × 3 × RF=3
-// cluster with REINDEX_CONCURRENCY=1):
+//  1. multi-node cluster (≥3 nodes) so per-node fan-out has goroutines
+//     on multiple nodes;
+//  2. multi-shard class (≥2 shards on the node) so limiter.Acquire
+//     blocks at least one shard's goroutine under the default
+//     concurrency cap; and
+//  3. fast cancel timing (~1s after STARTED) so the cancel arrives
+//     while at least one Acquire is blocked.
 //
-//   - End-to-end cancel-then-cleanup HTTP journey works (no
-//     panics, no orphan errors).
-//   - R5a invariant: cancel drains `.migrations/*_body_*` from
-//     every (node, shard) replica.
-//   - R5b invariant: backup of the class succeeds post-cancel
-//     (canCommit clears once trackers are gone).
-//   - R6 invariant: DELETE class succeeds + `<root>/<class>/`
-//     dir is absent on every node.
+// This test sets up a 3-node × 3-shard × RF=3 class (9 unit replicas),
+// triggers a `word→field` change-tokenization, cancels within 1 s of
+// STARTED, and asserts:
 //
-// Pre-cancel sanity (`require.NotEmpty(preCancelSurvivors)`) keeps
-// the test honest: a future runner that's so fast the migration
-// completes before our cancel reaches the cluster will fail loud
-// here instead of silently turning the post-cancel poll into a
-// trivially-green no-op.
+//   - R5a: `.migrations/*_body_*` directories drained from every
+//     replica on every node within 30 s.
+//   - R5b: a filesystem backup of the class succeeds end-to-end
+//     (canCommit must clear once trackers are gone).
+//   - R6:  DELETE class succeeds, and `<root>/<class-lower>/`
+//     directory is absent on every node within 30 s.
+//
+// Pre-c133b1fd0d this test failed on R5a (the 2-of-9-replicas pattern
+// QA's reindex-qa repro logged) and R6 (the leaked class tree on the
+// same affected node).
 func TestMultiNode_CancelClearsAcrossReplicas(t *testing.T) {
 	ctx := context.Background()
 	// S3 (MinIO) is the only viable backend for a multi-node cluster
