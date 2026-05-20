@@ -27,15 +27,9 @@ import (
 // tuple is currently known to the DTM scheduler. The implementation is
 // supplied by the caller — typically a closure that queries the DTM
 // manager's `ListDistributedTasks` snapshot — so this package stays
-// free of a direct cluster/distributedtask dependency for the audit
-// hot path.
-//
-// Cost: consulted once per discovered tracker dir. The audit runs at
-// startup and on post-restore class-dir hooks (rare, not query-path),
-// so the per-call cost — including the DTM list inside the closure —
-// is acceptable. With N orphans on a wide post-restore that's O(N)
-// DTM lists; if profiling ever shows it matters, lift to a factory
-// closure that snapshots once per audit invocation.
+// free of a direct cluster/distributedtask dependency. Consulted once
+// per tracker dir; the audit is not a query-path, so the per-call cost
+// is acceptable.
 type KnownReindexTaskLookup func(taskID string, taskVersion uint64) bool
 
 // SetReindexAuditDeps installs the dependencies the
@@ -304,27 +298,17 @@ func collectOrphanTrackers(lsmPath, collection, shardName string, knownTask Know
 	return orphans
 }
 
-// cleanLoadedShardOrphans drives the loaded-shard cleanup path under a
-// single PauseCompaction window. All orphan trackers on the shard are
-// cleaned under a SINGLE PauseCompaction / ResumeCompaction window.
-// The earlier per-orphan pause/resume pattern produced a race: pausing
-// for the first orphan drained the running compaction, but the resume
-// in the defer re-enabled compaction before the next orphan's pause
-// fired; a fresh compaction started on the second orphan's sidecar
-// bucket and the next pause timed out trying to drain it. Pausing once
-// for the whole shard closes that window — no orphan-sidecar compaction
-// can start between cleanups because the cycle manager stays
-// deactivated for the entire audit run on this shard.
+// cleanLoadedShardOrphans cleans every orphan on the shard under a
+// single PauseCompaction window. Per-orphan pause/resume previously
+// raced: the defer re-enabled compaction between orphans, a fresh
+// compaction started on the next orphan's sidecar bucket, and the
+// next pause timed out trying to drain it.
 //
-// Coordination with [Index.HaltForTransfer]: the audit's pause path
-// does NOT go through the backup `haltForTransferMux` / refcount, and
-// the cycle-manager `active` flag is a bool, not a refcount. A
-// concurrent backup landing on this shard mid-audit would compete on
-// that single bool. The actual defense is the [Backupable] precheck +
-// [Index.refuseIfReindexInFlight]: a backup landing mid-audit sees the
-// not-yet-removed tracker dirs on disk and refuses canCommit before it
-// reaches Deactivate. The audit removes the dirs in turn so the window
-// closes as cleanup progresses.
+// The audit's pause path does NOT coordinate with backup's
+// [Index.HaltForTransfer] via haltForTransferMux. A concurrent backup
+// is gated upstream by [Backupable] / [Index.refuseIfReindexInFlight]
+// — it refuses on the not-yet-removed tracker dirs before reaching
+// Deactivate.
 func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans []orphanReindexTracker, logger logrus.FieldLogger) int {
 	if len(orphans) == 0 {
 		return 0
@@ -336,8 +320,7 @@ func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans
 			Warnf("reindex orphan audit: failed to pause compaction on shard; skipping all orphan cleanups on this shard (next restart will retry): %v", err)
 		return 0
 	}
-	// Resume on a fresh context — must fire even if the audit ctx was
-	// cancelled, and the resume itself is a non-blocking bool flip.
+	// Resume must fire even if the audit ctx was cancelled.
 	defer func() {
 		if err := shard.store.ResumeCompaction(context.Background()); err != nil {
 			logger.WithField("shard", orphans[0].shardName).
