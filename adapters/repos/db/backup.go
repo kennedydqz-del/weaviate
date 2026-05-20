@@ -68,11 +68,11 @@ const (
 // dir is left behind with Status:Failed and Classes:[]; checkIfBackupExists
 // then rejects retry of the same ID because Failed != Cancelled.
 //
-// The check walks both loaded and unloaded shards (via the sharding
-// state, same as the upstream backup path). Unloaded shards on the
-// happy path return nil; an unloaded shard that was deactivated
-// mid-migration still has its tracker dir on disk, and we must refuse
-// for the same reason the active path does — see the
+// The check walks both loaded and unloaded shards via the schema
+// reader ([Index.readSchema]). Unloaded shards on the happy path
+// return nil; an unloaded shard that was deactivated mid-migration
+// still has its tracker dir on disk, and we must refuse for the same
+// reason the active path does — see the
 // [Index.backupInactiveShardWithHardlinks] godoc.
 func (db *DB) Backupable(ctx context.Context, classes []string) error {
 	for _, c := range classes {

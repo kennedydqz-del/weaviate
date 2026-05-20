@@ -30,9 +30,12 @@ import (
 // free of a direct cluster/distributedtask dependency for the audit
 // hot path.
 //
-// The lookup is consulted once per discovered tracker dir; the audit
-// is not on any query / write path so the per-call cost is fine to
-// hit a mutex inside the closure.
+// Cost: consulted once per discovered tracker dir. The audit runs at
+// startup and on post-restore class-dir hooks (rare, not query-path),
+// so the per-call cost — including the DTM list inside the closure —
+// is acceptable. With N orphans on a wide post-restore that's O(N)
+// DTM lists; if profiling ever shows it matters, lift to a factory
+// closure that snapshots once per audit invocation.
 type KnownReindexTaskLookup func(taskID string, taskVersion uint64) bool
 
 // SetReindexAuditDeps installs the dependencies the
@@ -277,9 +280,14 @@ func collectOrphanTrackers(lsmPath, collection, shardName string, knownTask Know
 		}
 		rec, recOK := loadAuditRecord(trackerPath)
 		if !recOK {
+			// Pre-#11327 binaries didn't write payload.mig. Such trackers
+			// landing on a fresh restore have no DTM correlation and are
+			// orphan by definition, but we can't safely auto-clean here
+			// without false positives on legitimate upgrade-in-progress
+			// state. WARN so operators can grep + manually intervene.
 			logger.WithField("collection", collection).WithField("shard", shardName).
 				WithField("tracker", dirName).
-				Debug("reindex orphan audit: tracker has no readable payload.mig; skipping (likely pre-recovery legacy state)")
+				Warn("reindex orphan audit: tracker has no readable payload.mig (likely pre-#11327 legacy state); leaving in place — manual cleanup may be required after upgrade")
 			continue
 		}
 		if knownTask(rec.TaskID, rec.TaskVersion) {
@@ -312,6 +320,16 @@ func collectOrphanTrackers(lsmPath, collection, shardName string, knownTask Know
 // for the whole shard closes that window — no orphan-sidecar compaction
 // can start between cleanups because the cycle manager stays
 // deactivated for the entire audit run on this shard.
+//
+// Coordination with [Index.HaltForTransfer]: the audit's pause path
+// does NOT go through the backup `haltForTransferMux` / refcount, and
+// the cycle-manager `active` flag is a bool, not a refcount. A
+// concurrent backup landing on this shard mid-audit would compete on
+// that single bool. The actual defense is the [Backupable] precheck +
+// [Index.refuseIfReindexInFlight]: a backup landing mid-audit sees the
+// not-yet-removed tracker dirs on disk and refuses canCommit before it
+// reaches Deactivate. The audit removes the dirs in turn so the window
+// closes as cleanup progresses.
 func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans []orphanReindexTracker, logger logrus.FieldLogger) int {
 	if len(orphans) == 0 {
 		return 0
@@ -323,6 +341,8 @@ func (db *DB) cleanLoadedShardOrphans(ctx context.Context, shard *Shard, orphans
 			Warnf("reindex orphan audit: failed to pause compaction on shard; skipping all orphan cleanups on this shard (next restart will retry): %v", err)
 		return 0
 	}
+	// Resume on a fresh context — must fire even if the audit ctx was
+	// cancelled, and the resume itself is a non-blocking bool flip.
 	defer func() {
 		if err := shard.store.ResumeCompaction(context.Background()); err != nil {
 			logger.WithField("shard", orphans[0].shardName).

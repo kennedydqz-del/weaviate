@@ -14,6 +14,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -198,6 +199,48 @@ func TestAuditOrphanReindexTrackers_KnownTaskSkipped_OrphanCleaned(t *testing.T)
 	_, err = os.Stat(orphanDir)
 	assert.True(t, os.IsNotExist(err),
 		"orphan tracker dir must be removed by the audit; stat err=%v", err)
+}
+
+// Pins the multi-orphan-per-shard regression: the single-PauseCompaction
+// window in [DB.cleanLoadedShardOrphans] was added because the prior
+// per-orphan pause/resume let a fresh compaction start on the second
+// orphan's sidecar bucket between cleanups. With ≥2 orphans on one
+// loaded shard all of them must be cleaned in one audit run.
+func TestAuditOrphanReindexTrackers_MultipleOrphansOnOneShard(t *testing.T) {
+	ctx := testCtx()
+	className := "AuditMultiOrphan"
+	shd, idx := testShard(t, ctx, className)
+
+	lsmPath := shd.(*Shard).pathLSM()
+	migs := filepath.Join(lsmPath, ".migrations")
+	// Tracker dir names must encode the property prefix so the underlying
+	// cleanStaleMigrationDirs can match them (see migrationDirsForPropertyIndex).
+	orphans := []struct{ prop, dir string }{
+		{"alpha", "searchable_retokenize_alpha_1"},
+		{"beta", "searchable_retokenize_beta_1"},
+		{"gamma", "searchable_retokenize_gamma_1"},
+	}
+	for i, o := range orphans {
+		dir := filepath.Join(migs, o.dir)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "started.mig"), nil, 0o600))
+		writePayload(t, dir, fmt.Sprintf("task-orphan-%d", i), uint64(i+1),
+			fmt.Sprintf("unit-orphan-%d", i), className,
+			ReindexTypeChangeTokenization, []string{o.prop})
+	}
+
+	db := &DB{
+		indices: map[string]*Index{indexID(idx.Config.ClassName): idx},
+		config:  Config{RootPath: idx.Config.RootPath},
+	}
+	knownNothing := func(string, uint64) bool { return false }
+	require.NoError(t, db.AuditOrphanReindexTrackers(ctx, knownNothing, logrus.New()))
+
+	for _, o := range orphans {
+		_, err := os.Stat(filepath.Join(migs, o.dir))
+		assert.Truef(t, os.IsNotExist(err),
+			"orphan tracker %s must be removed; stat err=%v", o.dir, err)
+	}
 }
 
 // TestAuditOrphanReindexTrackers_TidiedTrackerLeftAlone documents the
