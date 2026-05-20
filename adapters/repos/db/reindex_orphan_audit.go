@@ -280,14 +280,9 @@ func collectOrphanTrackers(lsmPath, collection, shardName string, knownTask Know
 		}
 		rec, recOK := loadAuditRecord(trackerPath)
 		if !recOK {
-			// Pre-#11327 binaries didn't write payload.mig. Such trackers
-			// landing on a fresh restore have no DTM correlation and are
-			// orphan by definition, but we can't safely auto-clean here
-			// without false positives on legitimate upgrade-in-progress
-			// state. WARN so operators can grep + manually intervene.
 			logger.WithField("collection", collection).WithField("shard", shardName).
 				WithField("tracker", dirName).
-				Warn("reindex orphan audit: tracker has no readable payload.mig (likely pre-#11327 legacy state); leaving in place — manual cleanup may be required after upgrade")
+				Warn("reindex orphan audit: tracker missing payload.mig; manual cleanup may be needed")
 			continue
 		}
 		if knownTask(rec.TaskID, rec.TaskVersion) {
