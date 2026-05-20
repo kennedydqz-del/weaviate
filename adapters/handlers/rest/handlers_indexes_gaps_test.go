@@ -514,57 +514,6 @@ func TestRequestedCancel(t *testing.T) {
 	})
 }
 
-// TestRequestedCleanup pins the dispatch helper introduced for the B6
-// side-effect-free repair verb (0-weaviate-issues#215 B6). Mirrors
-// TestRequestedCancel and tracks the same per-group truth table.
-func TestRequestedCleanup(t *testing.T) {
-	t.Run("none", func(t *testing.T) {
-		typ, ok := requestedCleanup(&models.IndexUpdateRequest{
-			Searchable: &models.IndexUpdateSearchable{Enabled: true},
-		})
-		require.False(t, ok)
-		require.Empty(t, typ)
-	})
-
-	t.Run("searchable.cleanup", func(t *testing.T) {
-		typ, ok := requestedCleanup(&models.IndexUpdateRequest{
-			Searchable: &models.IndexUpdateSearchable{Cleanup: true},
-		})
-		require.True(t, ok)
-		require.Equal(t, "searchable", typ)
-	})
-
-	t.Run("filterable.cleanup", func(t *testing.T) {
-		typ, ok := requestedCleanup(&models.IndexUpdateRequest{
-			Filterable: &models.IndexUpdateFilterable{Cleanup: true},
-		})
-		require.True(t, ok)
-		require.Equal(t, "filterable", typ)
-	})
-
-	t.Run("rangeable.cleanup", func(t *testing.T) {
-		typ, ok := requestedCleanup(&models.IndexUpdateRequest{
-			Rangeable: &models.IndexUpdateRangeable{Cleanup: true},
-		})
-		require.True(t, ok)
-		require.Equal(t, "rangeable", typ)
-	})
-
-	t.Run("cancel and cleanup are independent groups", func(t *testing.T) {
-		// validateBodyExclusivity rejects cleanup+cancel together within a
-		// group; the dispatch helpers are designed to be called in
-		// sequence (cancel first, then cleanup) and must not collide for
-		// bodies that set neither. Pinning this so a future refactor that
-		// makes requestedCleanup say "cleanup" for a body with only cancel
-		// gets caught.
-		typ, ok := requestedCleanup(&models.IndexUpdateRequest{
-			Searchable: &models.IndexUpdateSearchable{Cancel: true},
-		})
-		require.False(t, ok)
-		require.Empty(t, typ)
-	})
-}
-
 func TestMigrationTypeTargetsIndex(t *testing.T) {
 	cases := []struct {
 		mt          db.ReindexMigrationType
@@ -1104,78 +1053,6 @@ func TestValidateBodyExclusivity(t *testing.T) {
 			wantErr: "conflicting fields in searchable",
 		},
 
-		// --- B6: cleanup verb -------------------------------------------------
-		// Side-effect-free orphan-state cleanup. Mutually exclusive with every
-		// other verb in the group (combining with a real submit would race the
-		// cleanup against the submitted work), and across groups.
-		{
-			name: "valid: searchable.cleanup alone",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true},
-			},
-		},
-		{
-			name: "valid: filterable.cleanup alone",
-			body: &models.IndexUpdateRequest{
-				Filterable: &models.IndexUpdateFilterable{Cleanup: true},
-			},
-		},
-		{
-			name: "valid: rangeable.cleanup alone",
-			body: &models.IndexUpdateRequest{
-				Rangeable: &models.IndexUpdateRangeable{Cleanup: true},
-			},
-		},
-		{
-			name: "reject: searchable.cleanup + searchable.rebuild",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true, Rebuild: true},
-			},
-			wantErr: "conflicting fields in searchable",
-		},
-		{
-			name: "reject: searchable.cleanup + searchable.cancel",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true, Cancel: true},
-			},
-			wantErr: "conflicting fields in searchable",
-		},
-		{
-			name: "reject: searchable.cleanup + searchable.algorithm",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true, Algorithm: "BlockMaxWAND"},
-			},
-			wantErr: "conflicting fields in searchable",
-		},
-		{
-			name: "reject: searchable.cleanup + searchable.tokenization",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true, Tokenization: "word"},
-			},
-			wantErr: "conflicting fields in searchable",
-		},
-		{
-			name: "reject: filterable.cleanup + filterable.rebuild",
-			body: &models.IndexUpdateRequest{
-				Filterable: &models.IndexUpdateFilterable{Cleanup: true, Rebuild: true},
-			},
-			wantErr: "conflicting fields in filterable",
-		},
-		{
-			name: "reject: rangeable.cleanup + rangeable.enabled",
-			body: &models.IndexUpdateRequest{
-				Rangeable: &models.IndexUpdateRangeable{Cleanup: true, Enabled: true},
-			},
-			wantErr: "conflicting fields in rangeable",
-		},
-		{
-			name: "reject: searchable.cleanup + filterable.cleanup (cross-group)",
-			body: &models.IndexUpdateRequest{
-				Searchable: &models.IndexUpdateSearchable{Cleanup: true},
-				Filterable: &models.IndexUpdateFilterable{Cleanup: true},
-			},
-			wantErr: "multiple index groups",
-		},
 	}
 
 	for _, tc := range cases {

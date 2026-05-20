@@ -34,9 +34,6 @@ type IndexUpdateSearchable struct {
 	// When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.
 	Cancel bool `json:"cancel,omitempty"`
 
-	// When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/<dir> and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with "nothing to clean" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.
-	Cleanup bool `json:"cleanup,omitempty"`
-
 	// enabled
 	Enabled bool `json:"enabled,omitempty"`
 

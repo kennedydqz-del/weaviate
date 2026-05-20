@@ -8394,10 +8394,6 @@ func init() {
           "description": "When true, cancels the in-flight reindex task targeting this property's filterable index.",
           "type": "boolean"
         },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's filterable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, filterable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexFilterable flag is unchanged.",
-          "type": "boolean"
-        },
         "enabled": {
           "type": "boolean"
         },
@@ -8415,10 +8411,6 @@ func init() {
       "properties": {
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's rangeable index.",
-          "type": "boolean"
-        },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's rangeable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, rangeable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexRangeFilters flag is unchanged.",
           "type": "boolean"
         },
         "enabled": {
@@ -8464,10 +8456,6 @@ func init() {
         },
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.",
-          "type": "boolean"
-        },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.",
           "type": "boolean"
         },
         "enabled": {
@@ -19468,10 +19456,6 @@ func init() {
           "description": "When true, cancels the in-flight reindex task targeting this property's filterable index.",
           "type": "boolean"
         },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's filterable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, filterable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexFilterable flag is unchanged.",
-          "type": "boolean"
-        },
         "enabled": {
           "type": "boolean"
         },
@@ -19489,10 +19473,6 @@ func init() {
       "properties": {
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's rangeable index.",
-          "type": "boolean"
-        },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's rangeable index. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, rangeable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexRangeFilters flag is unchanged.",
           "type": "boolean"
         },
         "enabled": {
@@ -19538,10 +19518,6 @@ func init() {
         },
         "cancel": {
           "description": "When true, cancels the in-flight reindex task targeting this property's searchable index. The task transitions to CANCELLED; partial state is left on disk for the next-restart finalize.",
-          "type": "boolean"
-        },
-        "cleanup": {
-          "description": "When true, removes any leftover on-disk runtime-reindex state (sentinel .migrations/\u003cdir\u003e and partial __reindex/__ingest sidecar buckets) for this property's searchable index, WITHOUT switching the BM25 backing algorithm. Use this to clear silent half-state left behind by a backup taken during an in-flight migration. The handler refuses (409) if a STARTED reindex task is targeting this (collection, property, searchable) tuple — issue cancel:true first. Idempotent: if nothing is on disk, the call returns 200 with \"nothing to clean\" in the response body. The schema's indexSearchable flag and the searchable index's BM25 algorithm are unchanged.",
           "type": "boolean"
         },
         "enabled": {

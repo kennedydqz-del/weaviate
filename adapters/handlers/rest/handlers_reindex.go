@@ -339,17 +339,8 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Searchable.Algorithm != "" {
 			verbs = append(verbs, "searchable.algorithm")
 		}
-		// `cleanup` is a verb on its own — side-effect-free repair for
-		// orphan on-disk reindex state, 0-weaviate-issues#215 B6.
-		// Exclusive with every other verb in the group: cleanup is the
-		// "do nothing but remove orphan state" operation; combining it
-		// with enable/rebuild/algorithm/tokenization/cancel would race
-		// the cleanup against the submitted work.
-		if body.Searchable.Cleanup {
-			verbs = append(verbs, "searchable.cleanup")
-		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in searchable: %v — set exactly one of enabled, rebuild, tokenization, algorithm, cancel, or cleanup (tokenization combined with enabled is allowed)", verbs)
+			return fmt.Errorf("conflicting fields in searchable: %v — set exactly one of enabled, rebuild, tokenization, algorithm, or cancel (tokenization combined with enabled is allowed)", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "searchable")
@@ -373,12 +364,8 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Filterable.Cancel {
 			verbs = append(verbs, "filterable.cancel")
 		}
-		// `cleanup` — side-effect-free repair, 0-weaviate-issues#215 B6.
-		if body.Filterable.Cleanup {
-			verbs = append(verbs, "filterable.cleanup")
-		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in filterable: %v — set exactly one of enabled, rebuild, tokenization, cancel, or cleanup", verbs)
+			return fmt.Errorf("conflicting fields in filterable: %v — set exactly one of enabled, rebuild, tokenization, or cancel", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "filterable")
@@ -397,12 +384,8 @@ func validateBodyExclusivity(body *models.IndexUpdateRequest) error {
 		if body.Rangeable.Cancel {
 			verbs = append(verbs, "rangeable.cancel")
 		}
-		// `cleanup` — side-effect-free repair, 0-weaviate-issues#215 B6.
-		if body.Rangeable.Cleanup {
-			verbs = append(verbs, "rangeable.cleanup")
-		}
 		if len(verbs) > 1 {
-			return fmt.Errorf("conflicting fields in rangeable: %v — set exactly one of enabled, rebuild, cancel, or cleanup", verbs)
+			return fmt.Errorf("conflicting fields in rangeable: %v — set exactly one of enabled, rebuild, or cancel", verbs)
 		}
 		if len(verbs) == 1 {
 			groupsSet = append(groupsSet, "rangeable")

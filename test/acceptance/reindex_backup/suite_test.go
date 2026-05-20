@@ -166,16 +166,8 @@ func TestBackupVsReindexSuite(t *testing.T) {
 		testCancelOnNoInFlightReturns404(t, compose.GetWeaviate().URI())
 	})
 
-	// B6: cleanup:true on orphan state — operator-driven recovery
-	// path that does NOT switch the BM25 algorithm (the rebuild verb
-	// does). Craft orphan state on disk via docker exec, fire PUT
-	// cleanup, verify on-disk state is gone WITHOUT restart and
-	// WITHOUT touching the schema's tokenization. Then verify that
-	// cleanup:true with an in-flight task gets refused (409). See
-	// 0-weaviate-issues#215 B6.
-	t.Run("CleanupRemovesOrphanWithoutAlgorithmSwitch", func(t *testing.T) {
-		testCleanupRemovesOrphan(t, ctx, compose, compose.GetWeaviate().URI())
-	})
+	// B6 (formerly `cleanup:true`): retired — the audit + FAILED-task
+	// auto-cleanup paths cover the same ground without an operator verb.
 
 	// B7: PR description's `{"searchable":{"algorithm":"BlockMaxWAND"}}`
 	// body shape is now accepted by the handler (vs. the prior 400).
@@ -599,143 +591,6 @@ func testCancelOnNoInFlightReturns404(t *testing.T, restURI string) {
 		"404 body must point operators at the state-inspection endpoint")
 }
 
-// testCleanupRemovesOrphan exercises 0-weaviate-issues#215 B6: the
-// side-effect-free cleanup verb. Operators with silent half-state need
-// a way to clean it without restarting the cluster AND without forcing
-// a Map→BlockMax cutover (which the rebuild verb does as a one-way
-// side effect).
-//
-// Flow:
-//  1. Craft orphan tracker + sidecar on disk via docker exec (same
-//     pattern as the B3 audit test, but no restart afterwards).
-//  2. PUT {"searchable":{"cleanup":true}} — assert 202 with
-//     Status="CLEANED".
-//  3. Assert tracker dir + sidecar bucket dir are gone WITHOUT a
-//     restart (the verb's whole point).
-//  4. Assert the schema's reported tokenization on the searchable
-//     index is UNCHANGED — the rebuild verb would have triggered a
-//     migration; cleanup must not.
-//  5. Issue a real change-tokenization, then immediately fire cleanup
-//     while the task is STARTED — must return 409 with structured
-//     body naming the offending task and pointing at cancel.
-func testCleanupRemovesOrphan(t *testing.T, ctx context.Context, compose *docker.DockerCompose, restURI string) {
-	const (
-		className = "ReindexBackup_Cleanup"
-		propName  = "body"
-	)
-	helper.CreateClass(t, &models.Class{
-		Class: className,
-		Properties: []*models.Property{
-			{Name: propName, DataType: []string{"text"}, Tokenization: "word"},
-		},
-		Vectorizer: "none",
-	})
-	defer helper.DeleteClass(t, className)
-
-	importBodies(t, className, 200)
-	preCount := moduleshelper.GetClassCount(t, className, "")
-	require.EqualValues(t, 200, preCount)
-
-	shardName := reindexhelpers.GetFirstShardName(t, restURI, className)
-	require.NotEmpty(t, shardName)
-
-	container := compose.GetWeaviate().Container()
-	lsmPath := fmt.Sprintf("/data/%s/%s/lsm", strings.ToLower(className), shardName)
-	orphanDir := "searchable_retokenize_body_998"
-	sidecarBucket := "property_body_searchable__retokenize_reindex_998"
-	injectOrphanTrackerOnDisk(t, ctx, container, lsmPath, orphanDir, sidecarBucket,
-		fmt.Sprintf(`{"taskID":"orphan-cleanup-verb","taskVersion":1,"unitID":"u0","payload":{"collection":%q,"migrationType":"change-tokenization","properties":["body"],"targetTokenization":"lowercase","bucketStrategy":"map_collection"}}`, className))
-
-	// Capture the schema's tokenization before cleanup. This is the
-	// "no side effects on schema" guard.
-	tokBefore := readSearchableTokenization(t, restURI, className, propName)
-	require.Equal(t, "word", tokBefore, "fixture: searchable tokenization must be 'word' before cleanup")
-
-	// Fire the cleanup verb.
-	url := fmt.Sprintf("http://%s/v1/schema/%s/indexes/%s", restURI, className, propName)
-	req, err := http.NewRequest(http.MethodPut, url,
-		bytes.NewReader([]byte(`{"searchable":{"cleanup":true}}`)))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equalf(t, http.StatusAccepted, resp.StatusCode,
-		"expected 202 from cleanup; got %d: %s", resp.StatusCode, string(respBody))
-
-	// Body should report CLEANED. The handler returns IndexUpdateResponse.
-	var parsed struct {
-		Status string `json:"status"`
-	}
-	require.NoError(t, json.Unmarshal(respBody, &parsed))
-	assert.Equal(t, "CLEANED", parsed.Status,
-		"cleanup response status should be CLEANED, got %q", parsed.Status)
-
-	// Without a restart: tracker + sidecar must be gone.
-	code, _, _ := container.Exec(ctx, []string{"test", "-d", filepath.Join(lsmPath, ".migrations", orphanDir)})
-	assert.NotEqual(t, 0, code, "orphan tracker dir must be removed by cleanup verb (no restart)")
-
-	code, _, _ = container.Exec(ctx, []string{"test", "-d", filepath.Join(lsmPath, sidecarBucket)})
-	assert.NotEqual(t, 0, code, "orphan sidecar dir must be removed by cleanup verb (no restart)")
-
-	// Schema's tokenization must be UNCHANGED — the whole point of
-	// the cleanup verb vs rebuild=true is no side effects.
-	tokAfter := readSearchableTokenization(t, restURI, className, propName)
-	assert.Equal(t, tokBefore, tokAfter,
-		"cleanup must not switch tokenization (the side effect rebuild=true would have triggered)")
-
-	// And data must survive.
-	assert.EqualValues(t, preCount, moduleshelper.GetClassCount(t, className, ""),
-		"canonical data must survive cleanup; sidecar removal must not touch property_body or property_body_searchable")
-
-	// Now exercise the 409 refusal path: launch a real change-tokenization
-	// (which writes started.mig for a SHORT window), fire cleanup, expect
-	// 409. Because the migration may complete fast on a 200-row corpus,
-	// we try a few times — the race is acceptable because BOTH the 409
-	// and a 202-because-the-task-already-finished response prove the
-	// gate (409 explicitly, 202 implicitly because the dispatch only
-	// looks at STARTED tasks).
-	taskID := submitChangeTokenization(t, restURI, className, propName, "lowercase")
-
-	// Attempt cleanup repeatedly with a tight loop; if the task is still
-	// STARTED, we expect 409. We continue until we either see a 409 or
-	// the task reaches FINISHED. If we never see 409, log it but don't
-	// fail — the unit-test layer already pins the 409 dispatch logic.
-	saw409 := false
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodPut, url,
-			bytes.NewReader([]byte(`{"searchable":{"cleanup":true}}`)))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-		r, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		body, _ := io.ReadAll(r.Body)
-		_ = r.Body.Close()
-		if r.StatusCode == http.StatusConflict {
-			saw409 = true
-			// Verify the 409 body is structured.
-			s := string(body)
-			assert.Contains(t, s, "refusing cleanup",
-				"409 body must explain the refusal")
-			assert.Contains(t, s, taskID,
-				"409 body must name the conflicting task ID")
-			assert.Contains(t, s, `\"cancel\":true`,
-				"409 body must point operators at the cancel verb (the JSON snippet appears in the structured error message)")
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !saw409 {
-		t.Logf("note: did not observe 409 from cleanup-during-task (task likely finished too fast for this fixture); unit tests already pin the dispatch logic")
-	}
-
-	reindexhelpers.AwaitReindexFinished(t, restURI, taskID, reindexhelpers.WithTimeout(60*time.Second))
-}
-
 // testAlgorithmVerb exercises 0-weaviate-issues#215 B7 and the
 // follow-on already-blockmax refusal guard.
 //
@@ -753,16 +608,14 @@ func testCleanupRemovesOrphan(t *testing.T, ctx context.Context, compose *docker
 // by the first iteration of this test.
 //
 // Handler now refuses both `rebuild:true` and `algorithm:"BlockMaxWAND"`
-// at submit time when `UsingBlockMaxWAND` is already true on the
-// class, with 409 + structured body pointing the operator at
-// `cleanup:true` for orphan-state recovery.
+// at submit time when `UsingBlockMaxWAND` is already true, with 409 +
+// structured body noting that orphan state is cleaned automatically by
+// the FAILED-task hook + post-restart audit.
 //
 // Test pins:
-//   - already-blockmax + algorithm:"BlockMaxWAND" → 409, body names
-//     class+prop and points at cleanup:true
+//   - already-blockmax + algorithm:"BlockMaxWAND" → 409, body names class+prop
 //   - already-blockmax + rebuild:true             → 409, same shape
-//   - any state + algorithm:"WAND"                → 400, body names
-//     BlockMaxWAND as the supported alternative
+//   - any state + algorithm:"WAND"                → 400, body names BlockMaxWAND
 //   - no DTM task is left behind in any of the three paths
 func testAlgorithmVerb(t *testing.T, restURI string) {
 	const (
@@ -823,8 +676,8 @@ func testAlgorithmVerb(t *testing.T, restURI string) {
 		"409 body must name the class")
 	assert.Contains(t, string(bodyBytes), propName,
 		"409 body must name the property")
-	assert.Contains(t, string(bodyBytes), `\"cleanup\":true`,
-		"409 body must point the operator at the cleanup verb for orphan-state recovery")
+	assert.Contains(t, string(bodyBytes), "cleaned automatically",
+		"409 body must explain that orphan state is handled automatically")
 
 	// Case 2: already-blockmax + rebuild:true → 409 (parity with
 	// case 1; both routes through repair-searchable).

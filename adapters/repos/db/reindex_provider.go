@@ -1418,9 +1418,12 @@ func (p *ReindexProvider) OnTaskCompleted(task *distributedtask.Task) {
 
 	if task.Status != distributedtask.TaskStatusSwapping {
 		// Non-SWAPPING terminal/in-flight: no cluster-wide schema flip.
-		// On FAILED we still emit the operator repair guidance.
+		// On FAILED we emit the operator repair guidance AND
+		// auto-cleanup partial sidecar state — closes
+		// weaviate/0-weaviate-issues#215 B6 (no operator cleanup verb).
 		if task.Status == distributedtask.TaskStatusFailed && payloadErr == nil {
 			logOperatorRepairGuidanceOnFailedSemanticMigration(logger, payload)
+			p.autoCleanupAfterFailure(task, payload, logger)
 		}
 		return
 	}
@@ -1465,6 +1468,42 @@ func (p *ReindexProvider) OnTaskCompleted(task *distributedtask.Task) {
 		}
 	}
 }
+
+// On a FAILED semantic migration: drain any still-running local
+// goroutines, then wipe partial sidecar state per (property, indexType).
+// The next failed/cancelled migration leaves no state for operators to
+// chase. Errors are logged and swallowed — the next-restart audit will
+// pick anything up that this missed.
+func (p *ReindexProvider) autoCleanupAfterFailure(task *distributedtask.Task, payload *ReindexTaskPayload, logger logrus.FieldLogger) {
+	drainCtx, drainCancel := context.WithTimeout(p.serverCtx, reindexFailedCleanupDrainTimeout)
+	defer drainCancel()
+	if err := p.WaitForLocalTaskDrain(drainCtx, task.TaskDescriptor); err != nil {
+		logger.Warnf("auto-cleanup after FAILED: drain did not finish in %s; skipping cleanup (next-restart audit will retry): %v", reindexFailedCleanupDrainTimeout, err)
+		return
+	}
+	indexTypes := semanticMigrationIndexTypesForAudit(payload.MigrationType)
+	if len(indexTypes) == 0 || len(payload.Properties) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(p.serverCtx, reindexFailedCleanupTimeout)
+	defer cancel()
+	for _, propName := range payload.Properties {
+		for _, indexType := range indexTypes {
+			if err := p.db.CleanStalePartialReindexState(cleanupCtx, payload.Collection, propName, indexType); err != nil {
+				logger.WithField("property", propName).WithField("index_type", indexType).
+					Warnf("auto-cleanup after FAILED migration failed for this tuple (next-restart audit will retry): %v", err)
+			}
+		}
+	}
+	logger.Info("auto-cleanup after FAILED migration: partial sidecar state cleared on this node")
+}
+
+// Drain budget for the auto-cleanup-after-FAILED path. Matches the cancel
+// handler's drain timeout — see reindexCancelDrainTimeout in REST handlers.
+const reindexFailedCleanupDrainTimeout = 10 * time.Second
+
+// Cleanup budget per shard (sums across properties × indexTypes).
+const reindexFailedCleanupTimeout = 60 * time.Second
 
 // logOperatorRepairGuidanceOnFailedSemanticMigration logs the exact REST
 // command an operator should issue to recover from a FAILED semantic
