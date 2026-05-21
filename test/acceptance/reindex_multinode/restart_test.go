@@ -47,7 +47,7 @@ func TestMultiNode_GracefulRestartDuringReindex(t *testing.T) {
 	}
 
 	// Submit reindex.
-	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"rebuild":true}}`)
+	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"algorithm":"blockmax"}}`)
 	t.Logf("submitted reindex task: %s", taskID)
 
 	// Wait briefly then gracefully stop node 3.
@@ -103,7 +103,7 @@ func TestMultiNode_CrashDuringReindex(t *testing.T) {
 	}
 
 	// Submit reindex.
-	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"rebuild":true}}`)
+	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"algorithm":"blockmax"}}`)
 	t.Logf("submitted reindex task: %s", taskID)
 
 	// Wait briefly then crash node 3 ungracefully.
@@ -158,7 +158,7 @@ func TestMultiNode_MajorityCrashDuringReindex(t *testing.T) {
 		baselines[q] = results
 	}
 
-	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"rebuild":true}}`)
+	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"algorithm":"blockmax"}}`)
 	t.Logf("submitted reindex task: %s", taskID)
 
 	// Wait then crash majority (nodes 3 then 2).
@@ -222,7 +222,7 @@ func TestMultiNode_RollingRestartAfterComplete(t *testing.T) {
 	}
 
 	// Complete a reindex.
-	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"rebuild":true}}`)
+	taskID := reindexhelpers.SubmitIndexUpdate(t, restURI, className, "text", `{"searchable":{"algorithm":"blockmax"}}`)
 	reindexhelpers.AwaitReindexFinished(t, restURI, taskID, reindexhelpers.WithTimeout(180*time.Second))
 
 	// Rolling restart all 3 nodes one at a time.
